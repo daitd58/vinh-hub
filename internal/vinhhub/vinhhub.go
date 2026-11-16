@@ -3,7 +3,12 @@ package vinhhub
 import (
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,8 +20,23 @@ import (
 // State records persisted custom VinhHub configuration.
 type State struct {
 	CustomURL string    `json:"custom_url,omitempty"`
+	Width     int       `json:"width,omitempty"`
+	Height    int       `json:"height,omitempty"`
+	Filetype  string    `json:"filetype,omitempty"`
+	Size      int       `json:"size,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	UpdatedBy string    `json:"updated_by,omitempty"`
+}
+
+// ImageInfo contains metadata and signed URL needed to render the attachment full-size in Mezon.
+type ImageInfo struct {
+	URL      string
+	Filename string
+	Filetype string
+	Width    int
+	Height   int
+	Size     int
+	IsCustom bool
 }
 
 // SignerFunc is a function that returns a fresh signed URL for Mezon CDN or other URLs.
@@ -70,25 +90,95 @@ func (m *Manager) GetRawImageURL() (string, bool) {
 
 // GetImageURL returns the signed image URL ready for sending or viewing.
 func (m *Manager) GetImageURL() (string, error) {
+	info, err := m.GetImageInfo()
+	if err != nil {
+		return "", err
+	}
+	return info.URL, nil
+}
+
+// GetImageInfo returns the full image metadata with dimensions and signature.
+func (m *Manager) GetImageInfo() (*ImageInfo, error) {
 	m.mu.RLock()
 	rawURL := m.state.CustomURL
-	if rawURL == "" {
+	isCustom := rawURL != ""
+	if !isCustom {
 		rawURL = m.defaultURL
 	}
+	width := m.state.Width
+	height := m.state.Height
+	filetype := m.state.Filetype
+	size := m.state.Size
 	signer := m.signer
 	m.mu.RUnlock()
 
 	if rawURL == "" {
-		return "", fmt.Errorf("no vinhhub image configured")
+		return nil, fmt.Errorf("no vinhhub image configured")
 	}
 
+	signedURL := rawURL
 	if signer != nil {
-		return signer(rawURL)
+		var err error
+		signedURL, err = signer(rawURL)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return rawURL, nil
+
+	// Default dimensions for VinhHub menu (1290x960 natural resolution)
+	if width <= 0 || height <= 0 {
+		width = 1290
+		height = 960
+	}
+	if filetype == "" {
+		filetype = "image/png"
+		lower := strings.ToLower(rawURL)
+		if strings.HasSuffix(lower, ".jpg") || strings.HasSuffix(lower, ".jpeg") {
+			filetype = "image/jpeg"
+		}
+	}
+
+	return &ImageInfo{
+		URL:      signedURL,
+		Filename: "", // empty filename tells Mezon to render directly as inline image, matching KOMU
+		Filetype: filetype,
+		Width:    width,
+		Height:   height,
+		Size:     size,
+		IsCustom: isCustom,
+	}, nil
 }
 
-// Register validates and saves a new custom image URL.
+func probeImageDimensions(imgURL string) (width int, height int, filetype string, size int, err error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("GET", imgURL, nil)
+	if err != nil {
+		return 0, 0, "", 0, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, "", 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, 0, "", 0, fmt.Errorf("http status %d", resp.StatusCode)
+	}
+
+	contentLength := int(resp.ContentLength)
+	cfg, format, err := image.DecodeConfig(resp.Body)
+	if err != nil {
+		return 0, 0, "", contentLength, err
+	}
+	mime := "image/" + format
+	if format == "jpeg" {
+		mime = "image/jpeg"
+	}
+	return cfg.Width, cfg.Height, mime, contentLength, nil
+}
+
+// Register validates, probes dimensions, and saves a new custom image URL.
 func (m *Manager) Register(rawURL, updatedBy string) error {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
@@ -100,10 +190,34 @@ func (m *Manager) Register(rawURL, updatedBy string) error {
 		return fmt.Errorf("link ảnh không hợp lệ (cần bắt đầu bằng http:// hoặc https://)")
 	}
 
+	width, height, filetype, size := 1290, 960, "image/png", 0
+	urlToProbe := trimmed
+	m.mu.RLock()
+	signer := m.signer
+	m.mu.RUnlock()
+	if signer != nil {
+		if s, err := signer(trimmed); err == nil && s != "" {
+			urlToProbe = s
+		}
+	}
+
+	if w, h, mime, sz, err := probeImageDimensions(urlToProbe); err == nil && w > 0 && h > 0 {
+		width = w
+		height = h
+		filetype = mime
+		size = sz
+	} else if strings.HasSuffix(strings.ToLower(trimmed), ".jpg") || strings.HasSuffix(strings.ToLower(trimmed), ".jpeg") {
+		filetype = "image/jpeg"
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.state.CustomURL = trimmed
+	m.state.Width = width
+	m.state.Height = height
+	m.state.Filetype = filetype
+	m.state.Size = size
 	m.state.UpdatedAt = time.Now()
 	m.state.UpdatedBy = strings.TrimSpace(updatedBy)
 
@@ -111,7 +225,7 @@ func (m *Manager) Register(rawURL, updatedBy string) error {
 		return fmt.Errorf("lưu cấu hình thất bại: %w", err)
 	}
 
-	m.log.Info("registered new vinhhub image", "url", trimmed, "by", updatedBy)
+	m.log.Info("registered new vinhhub image", "url", trimmed, "width", width, "height", height, "by", updatedBy)
 	return nil
 }
 

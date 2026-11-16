@@ -2,6 +2,11 @@ package vinhhub
 
 import (
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"testing"
@@ -174,5 +179,50 @@ func TestManagerGetImageURLWithSigner(t *testing.T) {
 	})
 	if _, err := mgr.GetImageURL(); err == nil {
 		t.Fatal("expected signer error to propagate")
+	}
+}
+
+func TestGetImageInfoAndProbe(t *testing.T) {
+	// Setup test HTTP server serving a 300x150 test PNG
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		img := image.NewRGBA(image.Rect(0, 0, 300, 150))
+		img.Set(0, 0, color.RGBA{R: 255, A: 255})
+		w.Header().Set("Content-Type", "image/png")
+		_ = png.Encode(w, img)
+	}))
+	defer ts.Close()
+
+	defaultURL := "https://cdn.mezon.ai/1994479556801000/default.png"
+	mgr := NewManager(defaultURL, "", nil)
+
+	// Default info checks
+	info, err := mgr.GetImageInfo()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Width != 1290 || info.Height != 960 {
+		t.Errorf("expected default dimensions 1290x960, got %dx%d", info.Width, info.Height)
+	}
+	if info.Filetype != "image/png" {
+		t.Errorf("expected filetype image/png, got %s", info.Filetype)
+	}
+	if info.Filename != "" {
+		t.Errorf("expected empty filename for inline preview, got %s", info.Filename)
+	}
+
+	// Register probed image from test server
+	if err := mgr.Register(ts.URL+"/custom.png", "tester"); err != nil {
+		t.Fatalf("register probed image failed: %v", err)
+	}
+
+	customInfo, err := mgr.GetImageInfo()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if customInfo.Width != 300 || customInfo.Height != 150 {
+		t.Errorf("expected probed dimensions 300x150, got %dx%d", customInfo.Width, customInfo.Height)
+	}
+	if customInfo.Filetype != "image/png" {
+		t.Errorf("expected probed filetype image/png, got %s", customInfo.Filetype)
 	}
 }

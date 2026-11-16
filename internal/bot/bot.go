@@ -516,26 +516,28 @@ func (b *Bot) handleVinhHubCommand(m *mezon.ChannelMessage) {
 		return
 	}
 
-	imgURL, err := vinhHubMgr.GetImageURL()
+	info, err := vinhHubMgr.GetImageInfo()
 	if err != nil {
-		b.logger().Error("failed to get vinhhub image URL", "err", err)
+		b.logger().Error("failed to get vinhhub image info", "err", err)
 		_ = b.reply(m, fmt.Sprintf("⚠️ Không thể tải ảnh VinhHub: %v", err))
 		return
 	}
 
-	filename := vinhhub.FileNameFromURL(imgURL)
 	opts := &mezon.SendOptions{
 		Attachments: []mezon.Attachment{
 			{
-				Filename: filename,
-				Filetype: "image",
-				URL:      imgURL,
+				Filename: info.Filename,
+				Filetype: info.Filetype,
+				URL:      info.URL,
+				Width:    info.Width,
+				Height:   info.Height,
+				Size:     info.Size,
 			},
 		},
 	}
 
 	if err := b.replyWithOptions(m, "", opts); err != nil {
-		b.logger().Error("failed to send vinhhub image", "err", err, "url", imgURL)
+		b.logger().Error("failed to send vinhhub image", "err", err, "url", info.URL)
 		_ = b.reply(m, fmt.Sprintf("⚠️ Gửi ảnh VinhHub thất bại: %v", err))
 	}
 }
