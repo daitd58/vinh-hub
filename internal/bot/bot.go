@@ -13,6 +13,7 @@ import (
 	"github.com/quangledang23/mezon-sdk-go/api"
 
 	"vinh-hub/internal/fund"
+	"vinh-hub/internal/sport"
 )
 
 // Config configures the Mezon bot.
@@ -25,6 +26,7 @@ type Config struct {
 	DefaultChannelID string
 	DefaultThreadID  string
 	ThreadName       string
+	SportChannelID   string
 	FundReader       fund.BalanceReader
 	Timezone         *time.Location
 	Log              *slog.Logger
@@ -38,6 +40,7 @@ type Bot struct {
 	threadID   string
 	channelID  string
 	fundReader fund.BalanceReader
+	sportMgr   *sport.Manager
 }
 
 // New creates and initializes a Mezon bot instance.
@@ -150,6 +153,43 @@ func (b *Bot) ensureJoined() {
 			b.logger().Info("joined configured channel", "channel_id", chanID)
 		}
 	}
+
+	sportChanID := b.cfg.SportChannelID
+	if sportChanID != "" && sportChanID != chanID && sportChanID != thID {
+		if ch, err := b.client.Channels.Fetch(sportChanID); err == nil && ch != nil {
+			clanID := "0"
+			if ch.Clan != nil {
+				clanID = ch.Clan.ID
+			}
+			_, _ = b.client.Socket().JoinChat(clanID, ch.ID, ch.ChannelType, !ch.IsPrivate)
+			b.logger().Info("joined configured sport channel", "sport_channel_id", sportChanID)
+		}
+	}
+}
+
+// SetSportManager attaches the sport/badminton manager to the bot.
+func (b *Bot) SetSportManager(mgr *sport.Manager) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sportMgr = mgr
+}
+
+// SendToChannel sends a message with optional mentions directly to a channel.
+func (b *Bot) SendToChannel(ctx context.Context, channelID string, text string, opts *mezon.SendOptions) error {
+	ch, err := b.client.Channels.Fetch(channelID)
+	if err != nil {
+		return fmt.Errorf("fetch channel %s: %w", channelID, err)
+	}
+	clanID := "0"
+	if ch.Clan != nil {
+		clanID = ch.Clan.ID
+	}
+	_, _ = b.client.Socket().JoinChat(clanID, ch.ID, ch.ChannelType, !ch.IsPrivate)
+
+	if _, err := ch.Send(mezon.Text(text), opts); err != nil {
+		return fmt.Errorf("send to channel %s: %w", channelID, err)
+	}
+	return nil
 }
 
 // SendToThread sends a message to a thread or fallback channel.
@@ -253,12 +293,77 @@ func (b *Bot) handleMessage(m *mezon.ChannelMessage) {
 	}
 
 	text := strings.TrimSpace(m.ContentText())
-	switch strings.ToLower(text) {
-	case "*quy", "*fund", "/quy", "!quy":
-		b.handleFundCommand(m)
-	case "*help", "/help", "!help":
-		b.handleHelpCommand(m)
+
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	sportChanID := b.cfg.SportChannelID
+	b.mu.RUnlock()
+
+	// Record sport channel messages for badminton attendance & AI summary
+	if sportMgr != nil && m.ChannelID == sportChanID {
+		sportMgr.RecordMessage(m.ChannelID, m.ID, m.SenderID, m.Username, text)
 	}
+
+	cmd := strings.ToLower(text)
+	switch {
+	case cmd == "*quy" || cmd == "*fund" || cmd == "/quy" || cmd == "!quy":
+		b.handleFundCommand(m)
+	case cmd == "*help" || cmd == "/help" || cmd == "!help":
+		b.handleHelpCommand(m)
+	case cmd == "*diemdanh" || cmd == "*vinhhub diemdanh" || strings.HasPrefix(cmd, "*diemdanh"):
+		b.handleDiemDanhCommand(m)
+	case cmd == "*nhaclich" || cmd == "*vinhhub nhaclich":
+		b.handleNhacLichCommand(m)
+	case cmd == "*summary" || cmd == "*vinhhub summary":
+		b.handleSummaryCommand(m)
+	}
+}
+
+func (b *Bot) handleDiemDanhCommand(m *mezon.ChannelMessage) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng điểm danh chưa được cấu hình.")
+		return
+	}
+	if err := sportMgr.TriggerDiemDanh(context.Background(), time.Now()); err != nil {
+		b.logger().Error("trigger diemdanh failed", "err", err)
+		_ = b.reply(m, fmt.Sprintf("Lỗi gửi điểm danh: %v", err))
+		return
+	}
+	_ = b.reply(m, "Đã gửi thông báo điểm danh cho buổi đánh tiếp theo! 🏸")
+}
+
+func (b *Bot) handleNhacLichCommand(m *mezon.ChannelMessage) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+	if err := sportMgr.TriggerReminder(context.Background(), time.Now()); err != nil {
+		b.logger().Error("trigger nhaclich failed", "err", err)
+		_ = b.reply(m, fmt.Sprintf("Lỗi nhắc lịch: %v", err))
+		return
+	}
+	_ = b.reply(m, "Đã gửi nhắc lịch kèm tổng kết điểm danh! 🏸")
+}
+
+func (b *Bot) handleSummaryCommand(m *mezon.ChannelMessage) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+	sum := sportMgr.GetSummary(context.Background())
+	_ = b.reply(m, sum)
 }
 
 func (b *Bot) handleFundCommand(m *mezon.ChannelMessage) {
@@ -279,10 +384,14 @@ func (b *Bot) handleFundCommand(m *mezon.ChannelMessage) {
 }
 
 func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
-	help := "🤖 **Mezon Fund Bot**\n" +
-		"• `*quy`: Xem số dư hiện tại của quỹ\n" +
-		"• `*help`: Hiển thị hướng dẫn này\n\n" +
-		"Bot tự động cập nhật mọi biến động nhận/chi của quỹ vào luồng này theo thời gian thực."
+	help := "🤖 **Mezon Bot Hub**\n\n" +
+		"💰 **Quỹ & Tài chính:**\n" +
+		"• `*quy`: Xem số dư hiện tại của quỹ\n\n" +
+		"🏸 **Cầu lông & Thể thao:**\n" +
+		"• `*diemdanh`: Gửi thông báo điểm danh cho buổi đánh cầu tiếp theo\n" +
+		"• `*nhaclich`: Nhắc lịch trước giờ đánh & AI tóm tắt ai đi ai nghỉ, sân nào\n" +
+		"• `*summary`: Xem nhanh danh sách điểm danh và sân bãi hiện tại\n\n" +
+		"• `*help`: Hiển thị hướng dẫn này"
 	_ = b.reply(m, help)
 }
 

@@ -16,6 +16,7 @@ import (
 	"vinh-hub/internal/courier"
 	"vinh-hub/internal/fund"
 	"vinh-hub/internal/outbox"
+	"vinh-hub/internal/sport"
 )
 
 // outboxAdapter adapts outbox.Outbox to fund.Queue.
@@ -141,6 +142,7 @@ func main() {
 		DefaultChannelID: cfg.Mezon.ChannelID,
 		DefaultThreadID:  cfg.Mezon.ThreadID,
 		ThreadName:       cfg.Mezon.ThreadName,
+		SportChannelID:   cfg.Sport.ChannelID,
 		FundReader:       fundReader,
 		Timezone:         cfg.Fund.Timezone,
 		Log:              logger,
@@ -185,6 +187,31 @@ func main() {
 		cr.Run(ctx)
 	}()
 	logger.Info("courier started", "interval", cfg.App.CourierInterval)
+
+	// Run Badminton & Sport Scheduler
+	if cfg.Sport.Enabled {
+		sportMgr := sport.NewManager(sport.Config{
+			Enabled:   cfg.Sport.Enabled,
+			ClanID:    cfg.Sport.ClanID,
+			ChannelID: cfg.Sport.ChannelID,
+			RoleID:    cfg.Sport.RoleID,
+			RoleName:  cfg.Sport.RoleName,
+			StatePath: cfg.Sport.StatePath,
+			GeminiKey: cfg.Sport.GeminiKey,
+			Timezone:  cfg.Fund.Timezone,
+			Log:       logger,
+		}, mezonBot)
+
+		mezonBot.SetSportManager(sportMgr)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sportMgr.Run(ctx)
+		}()
+		logger.Info("badminton manager initialized and running",
+			"channel_id", cfg.Sport.ChannelID, "role", cfg.Sport.RoleName)
+	}
 
 	// Run Fund Stream
 	if cfg.Fund.NodeEndpoint != "" && cfg.Fund.Wallet != "" {

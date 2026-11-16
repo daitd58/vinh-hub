@@ -16,9 +16,21 @@ type Config struct {
 	Mezon     MezonConfig
 	App       AppConfig
 	BotWallet BotWalletConfig
+	Sport     SportConfig
 
 	DotEnvPath string
 	DotEnvErr  error
+}
+
+// SportConfig holds settings for badminton attendance and match reminders.
+type SportConfig struct {
+	Enabled   bool
+	ClanID    string
+	ChannelID string
+	RoleID    string
+	RoleName  string
+	StatePath string
+	GeminiKey string
 }
 
 // BotWalletConfig holds settings for the intermediary bot wallet.
@@ -105,6 +117,15 @@ func Load() *Config {
 	// Bot Wallet (Intermediary)
 	cfg.BotWallet.Address = strings.TrimSpace(env("BOT_WALLET_ADDRESS", ""))
 	cfg.BotWallet.PrivateKey = strings.TrimSpace(env("BOT_PRIVATE_KEY", ""))
+
+	// Sport (Badminton)
+	cfg.Sport.Enabled = boolEnv("SPORT_ENABLED", true)
+	cfg.Sport.ClanID = strings.TrimSpace(env("SPORT_CLAN_ID", "1779484504377790464"))
+	cfg.Sport.ChannelID = strings.TrimSpace(env("SPORT_CHANNEL_ID", "1840689219983380480"))
+	cfg.Sport.RoleID = strings.TrimSpace(env("SPORT_ROLE_ID", "1840693979155271680"))
+	cfg.Sport.RoleName = strings.TrimSpace(env("SPORT_ROLE_NAME", "Vinh-CL"))
+	cfg.Sport.StatePath = env("SPORT_STATE_PATH", "badminton_state.json")
+	cfg.Sport.GeminiKey = strings.TrimSpace(env("GEMINI_API_KEY", ""))
 
 	// App
 	intervalSec := intEnv("COURIER_INTERVAL", 30)

@@ -14,6 +14,13 @@ A real-time Mezon bot that monitors wallet transactions on the **Mezon Đồng**
 - **Accurate Balance Reporting**:
   - Fetches the current fund balance from the Mezon Đồng Indexer REST API (`MEZON_MAINNET_API_URL`).
   - Caches readings for 5 minutes and falls back to stale readings if the indexer is temporarily unreachable.
+- **Badminton Attendance & AI Summary Reminders (`@Vinh-CL`)**:
+  - **Auto Điểm danh (Attendance Call)**: 09:00 sáng Thứ 2 (cho Thứ 3), Thứ 4 (cho Thứ 5), Thứ 6 (cho Thứ 7), tự động ping role `@Vinh-CL` (`1840693979155271680`).
+  - **Nhắc lịch trước 1 tiếng**: Thứ 3 & Thứ 5 lúc 17:00 (đánh 18:00), Thứ 7 lúc 13:00 (đánh 14:00).
+  - **AI Message Summary**: Thu thập và tóm tắt toàn bộ tin nhắn từ khi điểm danh:
+    - Danh sách người tham gia (+1 / đi / có mặt)
+    - Danh sách người xin nghỉ (off / bận)
+    - Thông tin sân bãi (sân 1, 2, Minh Hải,... hoặc chưa có sân)
 - **Thread-Aware Mezon Bot**:
   - Connects to Mezon gateway using [`github.com/quangledang23/mezon-sdk-go`](https://github.com/quangledang23/mezon-sdk-go).
   - Posts updates directly into a target **Thread** (`MEZON_THREAD_ID`), or auto-creates/finds a thread under a parent channel (`MEZON_CHANNEL_ID`).
@@ -61,6 +68,27 @@ When checking balance on demand with `*quy`:
 Thông tin Quỹ
 • Quỹ hiện có: 2.736.348 VNĐ
 Cập nhật lúc: 09:53 28/09/2026
+```
+
+When auto-calling attendance (09:00 Mon/Wed/Fri):
+```text
+🏸 [ĐIỂM DANH CẦU LÔNG - THỨ BA (17/11)]
+Chào cả nhà @Vinh-CL! Lịch đánh cầu lông tiếp theo diễn ra vào Thứ Ba (17/11/2026) lúc 18:00.
+
+👉 Mọi người vào điểm danh xác nhận tham gia (+1 / đi / bận / off) trước 16:00 chiều để tiện chốt người và đặt sân nhé! 🔥
+```
+
+When reminding 1 hour before match (17:00 Tue/Thu, 13:00 Sat) with AI Summary:
+```text
+🏸 [NHẮC LỊCH ĐÁNH CẦU - THỨ BA (17/11)]
+Chào @Vinh-CL, còn 1 tiếng nữa là đến giờ quật cầu rồi (⏰ 18:00)! 🏸
+
+📋 TỔNG KẾT TÌNH HÌNH ĐIỂM DANH:
+• ✅ Tham gia (6 người): dai.trinhduc, tai.cumanhtuan, nam.nguyen, ...
+• ❌ Vắng mặt (2 người): hoang.nguyen, viet.le
+• 🏟️ Sân bãi: sân 1 sân 2 nha mn (Minh Hải)
+
+Chúc anh em một buổi giao lưu quật cầu thật cháy và nhiều tiếng cười! 🔥💪
 ```
 
 ---
@@ -144,13 +172,11 @@ make run
 ## Interactive Commands in Mezon
 
 When the bot is running in your channel or thread:
-- Type `*quy` or `*fund`: The bot queries the Mezon indexer live and responds with:
-  ```text
-  Thông tin Quỹ
-  • Quỹ hiện có: 2.736.348 VNĐ
-  Cập nhật lúc: 09:53 28/09/2026
-  ```
-- Type `*help`: The bot displays help and available commands.
+- `*quy` or `*fund`: The bot queries the Mezon indexer live and responds with the current fund balance.
+- `*diemdanh` (hoặc `*vinhhub diemdanh`): Kích hoạt ngay thông báo điểm danh cho buổi đánh tiếp theo (ping role `@Vinh-CL`).
+- `*nhaclich`: Gửi ngay tin nhắn nhắc lịch kèm AI tóm tắt danh sách tham gia, vắng mặt, và sân bãi.
+- `*summary`: Xem nhanh tình hình điểm danh hiện tại mà không cần đợi cron.
+- `*help`: Hiển thị bảng hướng dẫn lệnh.
 
 ---
 
