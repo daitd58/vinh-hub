@@ -120,6 +120,7 @@ type Forwarder struct {
 	tokenExpiry time.Time
 
 	mu        sync.Mutex
+	fwdMu     sync.Mutex
 	lastNonce uint64
 }
 
@@ -347,6 +348,9 @@ func (f *Forwarder) getIdToken(ctx context.Context) (string, error) {
 
 // Forward forwards an incoming movement from the bot wallet to the fund wallet on-chain.
 func (f *Forwarder) Forward(ctx context.Context, m Movement) (string, error) {
+	f.fwdMu.Lock()
+	defer f.fwdMu.Unlock()
+
 	if m.Raw == nil || m.Raw.Sign() <= 0 {
 		return "", fmt.Errorf("invalid or non-positive amount")
 	}
@@ -372,24 +376,24 @@ func (f *Forwarder) Forward(ctx context.Context, m Movement) (string, error) {
 
 	extraInfo := map[string]string{
 		"type":             "forward_via_bot",
-		"original_sender":   m.Sender,
-		"original_user":     senderName,
-		"original_content":  m.Content,
-		"original_tx":       m.Hash,
+		"original_sender":  m.Sender,
+		"original_user":    senderName,
+		"original_content": m.Content,
+		"original_tx":      m.Hash,
+	}
+
+	if f.useZK {
+		return f.forwardZK(ctx, u256Amount, forwardText, extraInfo)
 	}
 
 	nonce, err := f.nextNonce(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get nonce: %w", err)
 	}
-
-	if f.useZK {
-		return f.forwardZK(ctx, u256Amount, nonce, forwardText, extraInfo)
-	}
 	return f.forwardKey(ctx, u256Amount, nonce, forwardText, extraInfo)
 }
 
-func (f *Forwarder) forwardZK(ctx context.Context, amount *uint256.Int, nonce uint64, forwardText string, extraInfo map[string]string) (string, error) {
+func (f *Forwarder) forwardZK(ctx context.Context, amount *uint256.Int, forwardText string, extraInfo map[string]string) (string, error) {
 	// 1. Generate ephemeral Ed25519 keypair
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -413,7 +417,13 @@ func (f *Forwarder) forwardZK(ctx context.Context, amount *uint256.Int, nonce ui
 		return "", fmt.Errorf("obtain zk proof: %w", err)
 	}
 
-	// 4. Build Tx (TxTypeTransferByZk = 0)
+	// 4. Query fresh nonce right before building tx
+	nonce, err := f.nextNonce(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get nonce: %w", err)
+	}
+
+	// 5. Build Tx (TxTypeTransferByZk = 0)
 	unsigned, err := client.BuildTransferTx(
 		client.TxTypeTransferByZk,
 		f.botAddr,
@@ -430,13 +440,13 @@ func (f *Forwarder) forwardZK(ctx context.Context, amount *uint256.Int, nonce ui
 		return "", fmt.Errorf("build zk transfer tx: %w", err)
 	}
 
-	// 5. Sign with ephemeral private key
+	// 6. Sign with ephemeral private key
 	signedTx, err := client.SignTx(unsigned, pub, priv.Seed())
 	if err != nil {
 		return "", fmt.Errorf("sign zk transfer tx: %w", err)
 	}
 
-	// 6. Submit to node
+	// 7. Submit to node
 	res, err := f.sender.AddTx(ctx, signedTx)
 	if err != nil {
 		f.mu.Lock()
