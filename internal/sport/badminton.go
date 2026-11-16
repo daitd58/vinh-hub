@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -22,28 +23,31 @@ import (
 
 // MessageRecord stores a chat message captured from the sport channel.
 type MessageRecord struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"user_id"`
-	Username  string    `json:"username"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
+	ID          string    `json:"id"`
+	UserID      string    `json:"user_id"`
+	Username    string    `json:"username"`
+	DisplayName string    `json:"display_name,omitempty"`
+	Content     string    `json:"content"`
+	Timestamp   time.Time `json:"timestamp"`
 }
 
 // Participant represents a confirmed match participant with their slots count.
 type Participant struct {
-	UserID   string `json:"user_id"`
-	Username string `json:"username"`
-	Slots    int    `json:"slots"`
+	UserID      string `json:"user_id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name,omitempty"`
+	Slots       int    `json:"slots"`
 }
 
 // BillItem represents a single participant's share in a badminton bill.
 type BillItem struct {
-	UserID   string     `json:"user_id"`
-	Username string     `json:"username"`
-	Slots    int        `json:"slots"`
-	Amount   int64      `json:"amount"`
-	Paid     bool       `json:"paid"`
-	PaidAt   *time.Time `json:"paid_at,omitempty"`
+	UserID      string     `json:"user_id"`
+	Username    string     `json:"username"`
+	DisplayName string     `json:"display_name,omitempty"`
+	Slots       int        `json:"slots"`
+	Amount      int64      `json:"amount"`
+	Paid        bool       `json:"paid"`
+	PaidAt      *time.Time `json:"paid_at,omitempty"`
 }
 
 // BillSession holds the current active payment/splitting session.
@@ -152,9 +156,10 @@ type MessageSender interface {
 
 // Manager coordinates badminton attendance schedules, message recording, and AI summaries.
 type Manager struct {
-	cfg    Config
-	sender MessageSender
-	log    *slog.Logger
+	cfg      Config
+	sender   MessageSender
+	log      *slog.Logger
+	registry *UserRegistry
 
 	mu    sync.Mutex
 	state AttendanceState
@@ -182,13 +187,38 @@ func NewManager(cfg Config, sender MessageSender) *Manager {
 		logger = slog.Default()
 	}
 
+	regPath := "clan_users.json"
+	if cfg.StatePath != "" {
+		regPath = filepath.Join(filepath.Dir(cfg.StatePath), "clan_users.json")
+	}
+
 	m := &Manager{
-		cfg:    cfg,
-		sender: sender,
-		log:    logger,
+		cfg:      cfg,
+		sender:   sender,
+		log:      logger,
+		registry: NewUserRegistry(regPath),
 	}
 	m.loadState()
 	return m
+}
+
+// RegisterUser records or updates a clan user's profile in the registry.
+func (m *Manager) RegisterUser(userID, username, clanNick, displayName string) {
+	if m == nil || m.registry == nil {
+		return
+	}
+	m.registry.Register(userID, username, clanNick, displayName)
+}
+
+// ResolveDisplayName resolves a member's userID or username to their Clan Nickname.
+func (m *Manager) ResolveDisplayName(userID, username string) string {
+	if m == nil || m.registry == nil {
+		if username != "" {
+			return strings.TrimPrefix(username, "@")
+		}
+		return userID
+	}
+	return m.registry.ResolveDisplayName(userID, username)
 }
 
 func (m *Manager) loadState() {
@@ -305,9 +335,13 @@ func (m *Manager) RecordReaction(channelID, messageID, userID, username, emoji s
 		m.state.GoingParticipants = make(map[string]Participant)
 	}
 
-	name := username
-	if name == "" {
-		name = userID
+	rawUsername := username
+	if rawUsername == "" {
+		rawUsername = userID
+	}
+	displayName := m.ResolveDisplayName(userID, rawUsername)
+	if displayName == "" {
+		displayName = rawUsername
 	}
 
 	slots := count
@@ -325,27 +359,28 @@ func (m *Manager) RecordReaction(channelID, messageID, userID, username, emoji s
 		}
 	} else {
 		if isGoing {
-			m.state.ReactionsGoing[userID] = name
+			m.state.ReactionsGoing[userID] = rawUsername
 			m.state.GoingParticipants[userID] = Participant{
-				UserID:   userID,
-				Username: name,
-				Slots:    slots,
+				UserID:      userID,
+				Username:    rawUsername,
+				DisplayName: displayName,
+				Slots:       slots,
 			}
 			delete(m.state.ReactionsNotGoing, userID)
 		} else if isNotGoing {
-			m.state.ReactionsNotGoing[userID] = name
+			m.state.ReactionsNotGoing[userID] = rawUsername
 			delete(m.state.ReactionsGoing, userID)
 			delete(m.state.GoingParticipants, userID)
 		}
 	}
 
 	m.saveStateLocked()
-	m.log.Info("recorded sport reaction", "user", name, "emoji", emoji, "is_remove", isRemove, "slots", slots,
+	m.log.Info("recorded sport reaction", "user", displayName, "username", rawUsername, "emoji", emoji, "is_remove", isRemove, "slots", slots,
 		"going_count", len(m.state.ReactionsGoing), "not_going_count", len(m.state.ReactionsNotGoing))
 }
 
 // RecordMessage stores incoming channel messages for the current attendance session.
-func (m *Manager) RecordMessage(channelID, msgID, userID, username, content string) {
+func (m *Manager) RecordMessage(channelID, msgID, userID, username, content string, clanNicks ...string) {
 	if channelID != m.cfg.ChannelID {
 		return
 	}
@@ -354,15 +389,25 @@ func (m *Manager) RecordMessage(channelID, msgID, userID, username, content stri
 		return
 	}
 
+	clanNick := ""
+	if len(clanNicks) > 0 {
+		clanNick = clanNicks[0]
+	}
+	if clanNick != "" {
+		m.RegisterUser(userID, username, clanNick, "")
+	}
+	displayName := m.ResolveDisplayName(userID, username)
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	rec := MessageRecord{
-		ID:        msgID,
-		UserID:    userID,
-		Username:  username,
-		Content:   content,
-		Timestamp: time.Now(),
+		ID:          msgID,
+		UserID:      userID,
+		Username:    username,
+		DisplayName: displayName,
+		Content:     content,
+		Timestamp:   time.Now(),
 	}
 
 	m.state.Messages = append(m.state.Messages, rec)
@@ -820,25 +865,29 @@ func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecor
 	}
 
 	// Fallback to Rule-based NLP Parser merged with reactions
-	nlpRes := ParseMessagesNLP(messages)
+	nlpRes := m.ParseMessagesNLP(messages)
 
 	goingMap := make(map[string]bool)
 	notGoingMap := make(map[string]bool)
 
 	for _, u := range goingReactions {
-		goingMap[u] = true
+		disp := m.ResolveDisplayName("", u)
+		goingMap[disp] = true
 	}
 	for _, u := range notGoingReactions {
-		notGoingMap[u] = true
+		disp := m.ResolveDisplayName("", u)
+		notGoingMap[disp] = true
 	}
 
 	for _, u := range nlpRes.Going {
-		delete(notGoingMap, u)
-		goingMap[u] = true
+		disp := m.ResolveDisplayName("", u)
+		delete(notGoingMap, disp)
+		goingMap[disp] = true
 	}
 	for _, u := range nlpRes.NotGoing {
-		delete(goingMap, u)
-		notGoingMap[u] = true
+		disp := m.ResolveDisplayName("", u)
+		delete(goingMap, disp)
+		notGoingMap[disp] = true
 	}
 
 	var going []string
@@ -862,7 +911,17 @@ func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecor
 }
 
 // ParseMessagesNLP extracts attendance, absences, and court info using Vietnamese badminton patterns.
+func (m *Manager) ParseMessagesNLP(messages []MessageRecord) SummaryResult {
+	resolver := m.ResolveDisplayName
+	return parseMessagesNLPInternal(messages, resolver)
+}
+
+// ParseMessagesNLP is also provided as a standalone function for backwards compatibility with tests.
 func ParseMessagesNLP(messages []MessageRecord) SummaryResult {
+	return parseMessagesNLPInternal(messages, nil)
+}
+
+func parseMessagesNLPInternal(messages []MessageRecord, resolver func(userID, username string) string) SummaryResult {
 	goingMap := make(map[string]bool)
 	notGoingMap := make(map[string]bool)
 	var courtMentions []string
@@ -873,7 +932,13 @@ func ParseMessagesNLP(messages []MessageRecord) SummaryResult {
 	reCourt := regexp.MustCompile(`(?i)(sân\s+\d+|san\s+\d+|sân\s+[a-zA-Z0-9\s]+|Minh Hải|minh hai|đặt sân|chưa có sân|k có sân|không có sân|full sân|hết sân)`)
 
 	for _, msg := range messages {
-		name := msg.Username
+		name := msg.DisplayName
+		if name == "" && resolver != nil {
+			name = resolver(msg.UserID, msg.Username)
+		}
+		if name == "" {
+			name = msg.Username
+		}
 		if name == "" {
 			name = msg.UserID
 		}
@@ -929,10 +994,18 @@ func (m *Manager) buildTranscript(messages []MessageRecord, goingReactions, notG
 	if len(goingReactions) > 0 || len(notGoingReactions) > 0 {
 		sb.WriteString("Danh sách điểm danh qua reaction tin nhắn:\n")
 		if len(goingReactions) > 0 {
-			sb.WriteString(fmt.Sprintf("- Đã react :cong1: (tham gia - %d người): %s\n", len(goingReactions), strings.Join(goingReactions, ", ")))
+			var resolvedGoing []string
+			for _, u := range goingReactions {
+				resolvedGoing = append(resolvedGoing, m.ResolveDisplayName("", u))
+			}
+			sb.WriteString(fmt.Sprintf("- Đã react :cong1: (tham gia - %d người): %s\n", len(resolvedGoing), strings.Join(resolvedGoing, ", ")))
 		}
 		if len(notGoingReactions) > 0 {
-			sb.WriteString(fmt.Sprintf("- Đã react :tru1: (vắng mặt/bận - %d người): %s\n", len(notGoingReactions), strings.Join(notGoingReactions, ", ")))
+			var resolvedNotGoing []string
+			for _, u := range notGoingReactions {
+				resolvedNotGoing = append(resolvedNotGoing, m.ResolveDisplayName("", u))
+			}
+			sb.WriteString(fmt.Sprintf("- Đã react :tru1: (vắng mặt/bận - %d người): %s\n", len(resolvedNotGoing), strings.Join(resolvedNotGoing, ", ")))
 		}
 		sb.WriteString("\n")
 	}
@@ -940,9 +1013,9 @@ func (m *Manager) buildTranscript(messages []MessageRecord, goingReactions, notG
 	if len(messages) > 0 {
 		sb.WriteString("Tin nhắn trò chuyện trong nhóm chat:\n")
 		for _, msg := range messages {
-			name := msg.Username
+			name := msg.DisplayName
 			if name == "" {
-				name = msg.UserID
+				name = m.ResolveDisplayName(msg.UserID, msg.Username)
 			}
 			sb.WriteString(fmt.Sprintf("- %s: %s\n", name, msg.Content))
 		}
@@ -971,9 +1044,14 @@ func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecor
 			{
 				"role": "system",
 				"content": "Bạn là trợ lý cho câu lạc bộ cầu lông Vinh-CL. Dựa vào danh sách reaction và tin nhắn trong nhóm chat, hãy tóm tắt ngắn gọn và rõ ràng tình hình đánh cầu bằng tiếng Việt theo các gạch đầu dòng sau:\n" +
-					"• ✅ **Tham gia (số lượng):** [Liệt kê tên những người xác nhận đi qua reaction :cong1: hoặc chat]\n" +
-					"• ❌ **Vắng mặt:** [Liệt kê tên những người xin nghỉ/bận qua reaction :tru1: hoặc chat, nếu có]\n" +
-					"• 🏟️ **Sân bãi:** [Thông tin sân đã đặt nào hoặc chưa/k có sân, giờ chơi nếu có]\n" +
+					"• ✅ **Tham gia (số lượng):** [Liệt kê Clan Nickname / Họ tên hiển thị những người xác nhận tham gia qua reaction :cong1: hoặc chat]\n" +
+					"• ❌ **Vắng mặt:** [Liệt kê Clan Nickname / Họ tên hiển thị những người xin nghỉ/bận qua reaction :tru1: hoặc chat, nếu có]\n" +
+					"• 🏟️ **Sân bãi:** [Thông tin sân đã đặt nào hoặc chưa/k có sân, giờ chơi nếu có]\n\n" +
+					"QUY TẮC BẮT BUỘC VỀ TÊN VÀ XỬ LÝ TRÙNG LẶP:\n" +
+					"1. BẮT BUỘC DÙNG CLAN NICKNAME / TÊN HIỂN THỊ CỦA THÀNH VIÊN (ví dụ: Sơn Nguyễn Trường, Trịnh Đức Đại, Lê Đức Anh, v.v.). TUYỆT ĐỐI KHÔNG dùng username kỹ thuật (như son.nguyentruong1, dai.trinhduc, ntdon1502).\n" +
+					"2. XỬ LÝ GỘP (DEDUPLICATE) CÁC TÊN GỌI TẮT VÀ ALIAS: Các tên gọi tắt hoặc username như 'son.nt', 'son.nguyentruong1', 'Sơn NT', 'Sơn Nguyễn Trường' đều là CÙNG MỘT NGƯỜI (Sơn Nguyễn Trường). Tuyệt đối KHÔNG ĐƯỢC tính thành 2 người riêng biệt!\n" +
+					"3. Nếu một người vừa react tin nhắn vừa chat trong nhóm, chỉ tính là 1 người duy nhất.\n" +
+					"4. Đếm chính xác số người thực tế trong ngoặc đơn, không bao giờ được đếm trùng lặp.\n" +
 					"Chỉ trả về nội dung gạch đầu dòng ngắn gọn, súc tích, không thêm lời chào hay giải thích rườm rà.",
 			},
 			{
@@ -981,7 +1059,7 @@ func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecor
 				"content": fmt.Sprintf("Dưới đây là thông tin điểm danh và tin nhắn nhóm:\n\n%s", transcript),
 			},
 		},
-		"temperature": 0.3,
+		"temperature": 0.2,
 	}
 
 	bodyBytes, err := json.Marshal(payload)
@@ -1036,9 +1114,14 @@ func (m *Manager) callGeminiSummary(ctx context.Context, messages []MessageRecor
 	prompt := fmt.Sprintf(
 		"Dưới đây là thông tin điểm danh và tin nhắn trong nhóm chat câu lạc bộ cầu lông Vinh-CL:\n\n%s\n\n"+
 			"Hãy tóm tắt ngắn gọn và rõ ràng tình hình đánh cầu bằng tiếng Việt theo các gạch đầu dòng sau:\n"+
-			"• ✅ **Tham gia (số lượng):** [Liệt kê tên những người xác nhận đi qua reaction :cong1: hoặc chat]\n"+
-			"• ❌ **Vắng mặt:** [Liệt kê tên những người xin nghỉ/bận qua reaction :tru1: hoặc chat, nếu có]\n"+
-			"• 🏟️ **Sân bãi:** [Thông tin sân đã đặt nào hoặc chưa/k có sân]\n"+
+			"• ✅ **Tham gia (số lượng):** [Liệt kê Clan Nickname / Họ tên hiển thị những người xác nhận tham gia qua reaction :cong1: hoặc chat]\n"+
+			"• ❌ **Vắng mặt:** [Liệt kê Clan Nickname / Họ tên hiển thị những người xin nghỉ/bận qua reaction :tru1: hoặc chat, nếu có]\n"+
+			"• 🏟️ **Sân bãi:** [Thông tin sân đã đặt nào hoặc chưa/k có sân, khung giờ chơi nếu có]\n\n"+
+			"QUY TẮC BẮT BUỘC VỀ TÊN VÀ XỬ LÝ TRÙNG LẶP:\n"+
+			"1. BẮT BUỘC DÙNG CLAN NICKNAME / TÊN HIỂN THỊ CỦA THÀNH VIÊN (ví dụ: Sơn Nguyễn Trường, Trịnh Đức Đại, Lê Đức Anh, v.v.). TUYỆT ĐỐI KHÔNG dùng username kỹ thuật (như son.nguyentruong1, dai.trinhduc, ntdon1502).\n"+
+			"2. XỬ LÝ GỘP (DEDUPLICATE) CÁC TÊN GỌI TẮT VÀ ALIAS: Các tên gọi tắt như 'son.nt', 'son.nguyentruong1', 'Sơn NT', 'Sơn Nguyễn Trường' đều là CÙNG MỘT NGƯỜI (Sơn Nguyễn Trường). Tuyệt đối KHÔNG ĐƯỢC tính thành 2 người riêng biệt!\n"+
+			"3. Nếu một người vừa react tin nhắn vừa chat trong nhóm, chỉ tính là 1 người duy nhất.\n"+
+			"4. Đếm chính xác số người thực tế trong ngoặc đơn, không bao giờ được đếm trùng lặp.\n"+
 			"Chỉ trả về nội dung gạch đầu dòng ngắn gọn, không rườm rà.",
 		transcript,
 	)
@@ -1554,12 +1637,17 @@ func (m *Manager) CreateSplitBill(expr string, customParticipants ...Participant
 	items := make(map[string]*BillItem)
 	for _, p := range participants {
 		userAmount := int64(p.Slots) * slotPrice
+		disp := p.DisplayName
+		if disp == "" {
+			disp = m.ResolveDisplayName(p.UserID, p.Username)
+		}
 		items[p.UserID] = &BillItem{
-			UserID:   p.UserID,
-			Username: p.Username,
-			Slots:    p.Slots,
-			Amount:   userAmount,
-			Paid:     false,
+			UserID:      p.UserID,
+			Username:    p.Username,
+			DisplayName: disp,
+			Slots:       p.Slots,
+			Amount:      userAmount,
+			Paid:        false,
 		}
 	}
 
@@ -1636,12 +1724,17 @@ func (m *Manager) CreateMoneyBill(unitAmount int, customParticipants ...Particip
 	items := make(map[string]*BillItem)
 	for _, p := range participants {
 		userAmount := int64(p.Slots) * slotPrice
+		disp := p.DisplayName
+		if disp == "" {
+			disp = m.ResolveDisplayName(p.UserID, p.Username)
+		}
 		items[p.UserID] = &BillItem{
-			UserID:   p.UserID,
-			Username: p.Username,
-			Slots:    p.Slots,
-			Amount:   userAmount,
-			Paid:     false,
+			UserID:      p.UserID,
+			Username:    p.Username,
+			DisplayName: disp,
+			Slots:       p.Slots,
+			Amount:      userAmount,
+			Paid:        false,
 		}
 	}
 
@@ -1838,7 +1931,8 @@ func (m *Manager) MarkPaidByUserIDOrNameOnBill(msgID, userID, username string) (
 	target := strings.ToLower(strings.TrimPrefix(username, "@"))
 	for _, item := range targetBill.Items {
 		uLower := strings.ToLower(strings.TrimPrefix(item.Username, "@"))
-		if uLower == target || item.UserID == target {
+		dLower := strings.ToLower(strings.TrimPrefix(item.DisplayName, "@"))
+		if uLower == target || dLower == target || item.UserID == target {
 			item.Paid = true
 			item.PaidAt = &now
 			m.saveStateLocked()
@@ -1879,7 +1973,9 @@ func (m *Manager) MarkPaidBatch(names []string, filter ...string) (paidItems []*
 
 		var matched *BillItem
 		for _, item := range targetBill.Items {
-			if strings.ToLower(strings.TrimPrefix(item.Username, "@")) == clean || item.UserID == clean {
+			uLower := strings.ToLower(strings.TrimPrefix(item.Username, "@"))
+			dLower := strings.ToLower(strings.TrimPrefix(item.DisplayName, "@"))
+			if uLower == clean || dLower == clean || item.UserID == clean {
 				matched = item
 				break
 			}
@@ -1941,7 +2037,9 @@ func (m *Manager) MarkUnpaidOnBill(msgID string, names []string) (unmarked []*Bi
 
 		var matched *BillItem
 		for _, item := range targetBill.Items {
-			if strings.ToLower(strings.TrimPrefix(item.Username, "@")) == clean || item.UserID == clean {
+			uLower := strings.ToLower(strings.TrimPrefix(item.Username, "@"))
+			dLower := strings.ToLower(strings.TrimPrefix(item.DisplayName, "@"))
+			if uLower == clean || dLower == clean || item.UserID == clean {
 				matched = item
 				break
 			}
@@ -1986,7 +2084,9 @@ func (m *Manager) MarkUnpaidBatch(names []string, filter ...string) (unmarked []
 
 		var matched *BillItem
 		for _, item := range targetBill.Items {
-			if strings.ToLower(strings.TrimPrefix(item.Username, "@")) == clean || item.UserID == clean {
+			uLower := strings.ToLower(strings.TrimPrefix(item.Username, "@"))
+			dLower := strings.ToLower(strings.TrimPrefix(item.DisplayName, "@"))
+			if uLower == clean || dLower == clean || item.UserID == clean {
 				matched = item
 				break
 			}
@@ -2227,11 +2327,12 @@ func (m *Manager) GetLeaderboardText(monthInput string, now time.Time) (string, 
 
 	statsMap := make(map[string]*statsHolder)
 	getStats := func(uname string) *statsHolder {
-		key := strings.ToLower(uname)
+		disp := m.ResolveDisplayName("", uname)
+		key := strings.ToLower(disp)
 		if s, ok := statsMap[key]; ok {
 			return s
 		}
-		s := &statsHolder{username: uname}
+		s := &statsHolder{username: disp}
 		statsMap[key] = s
 		return s
 	}

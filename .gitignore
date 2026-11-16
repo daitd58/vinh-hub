@@ -21,3 +21,8 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Runtime state files
+badminton_state.json
+clan_users.json
+

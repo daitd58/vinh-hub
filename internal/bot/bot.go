@@ -101,6 +101,7 @@ func New(cfg Config) (*Bot, error) {
 
 	c.OnReady(func() {
 		b.logger().Info("mezon bot ready", "bot_id", cfg.BotID, "host", host)
+		go b.syncClanMembers(cfg.SportClanID)
 	})
 
 	c.OnChannelMessage(func(m *mezon.ChannelMessage) {
@@ -341,6 +342,53 @@ func (b *Bot) ReactToMessage(ctx context.Context, channelID, messageID, emoji st
 	return err
 }
 
+func (b *Bot) syncClanMembers(clanID string) {
+	if b.client == nil || clanID == "" {
+		return
+	}
+	clanIDInt, err := strconv.ParseInt(clanID, 10, 64)
+	if err != nil || clanIDInt == 0 {
+		return
+	}
+
+	sessionToken := b.client.SessionToken()
+	apiClient := b.client.Api()
+	if sessionToken == "" || apiClient == nil {
+		return
+	}
+
+	req := &api.ListClanUsersRequest{ClanId: clanIDInt}
+	var resp api.ClanUserList
+	if err := apiClient.Call(sessionToken, "ListClanUsers", req, &resp); err != nil {
+		b.logger().Warn("could not sync clan users via api", "err", err, "clan_id", clanID)
+		return
+	}
+
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		return
+	}
+
+	count := 0
+	for _, cu := range resp.GetClanUsers() {
+		if cu == nil || cu.GetUser() == nil {
+			continue
+		}
+		u := cu.GetUser()
+		uid := strconv.FormatInt(u.GetId(), 10)
+		uname := u.GetUsername()
+		dispName := u.GetDisplayName()
+		clanNick := cu.GetClanNick()
+
+		sportMgr.RegisterUser(uid, uname, clanNick, dispName)
+		count++
+	}
+	b.logger().Info("successfully synced clan members", "count", count, "clan_id", clanID)
+}
+
 func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 	b.mu.RLock()
 	sportMgr := b.sportMgr
@@ -368,7 +416,9 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 
 	msgID := strconv.FormatInt(ev.MessageId, 10)
 	senderName := ev.SenderName
-	if senderName == "" {
+	if sportMgr != nil {
+		senderName = sportMgr.ResolveDisplayName(senderID, senderName)
+	} else if senderName == "" {
 		if u, err := b.client.Users.Fetch(senderID); err == nil && u != nil && u.Username != "" {
 			senderName = u.Username
 		} else {
@@ -520,9 +570,18 @@ func (b *Bot) handleMessage(m *mezon.ChannelMessage) {
 	sportChanID := b.cfg.SportChannelID
 	b.mu.RUnlock()
 
+	// Cache user profile with clan nickname from message if present
+	if sportMgr != nil && (m.ClanNick != "" || m.DisplayName != "") {
+		sportMgr.RegisterUser(m.SenderID, m.Username, m.ClanNick, m.DisplayName)
+	}
+
 	// Record sport channel messages for badminton attendance & AI summary
 	if sportMgr != nil && m.ChannelID == sportChanID {
-		sportMgr.RecordMessage(m.ChannelID, m.ID, m.SenderID, m.Username, text)
+		clanNick := m.ClanNick
+		if clanNick == "" {
+			clanNick = m.DisplayName
+		}
+		sportMgr.RecordMessage(m.ChannelID, m.ID, m.SenderID, m.Username, text, clanNick)
 	}
 
 	cmd := strings.ToLower(text)
@@ -1022,11 +1081,15 @@ func (b *Bot) handleSplitCommand(m *mezon.ChannelMessage, rawText string) {
 
 	for _, item := range sortedItems {
 		slotText := fmt.Sprintf("%d slot", item.Slots)
-		tag := "@" + item.Username
+		nameToDisplay := item.Username
+		if sportMgr != nil {
+			nameToDisplay = sportMgr.ResolveDisplayName(item.UserID, item.Username)
+		}
+		tag := "@" + nameToDisplay
 		sb.WriteString(fmt.Sprintf("• %s (%s): **%s VNĐ**\n", tag, slotText, fund.FormatVND(item.Amount)))
 		mentions = append(mentions, mezon.Mention{
 			UserID:   item.UserID,
-			Username: item.Username,
+			Username: nameToDisplay,
 		})
 	}
 
@@ -1140,12 +1203,16 @@ func (b *Bot) handleMoneyCommand(m *mezon.ChannelMessage, rawText string) {
 
 	for _, item := range sortedItems {
 		slotText := fmt.Sprintf("%d slot", item.Slots)
-		tag := "@" + item.Username
+		nameToDisplay := item.Username
+		if sportMgr != nil {
+			nameToDisplay = sportMgr.ResolveDisplayName(item.UserID, item.Username)
+		}
+		tag := "@" + nameToDisplay
 		sb.WriteString(fmt.Sprintf("• %s (%s): **%s VNĐ**\n", tag, slotText, fund.FormatVND(item.Amount)))
 
 		mentions = append(mentions, mezon.Mention{
 			UserID:   item.UserID,
-			Username: item.Username,
+			Username: nameToDisplay,
 		})
 	}
 
@@ -1246,7 +1313,11 @@ func formatBillDashboard(bill *sport.BillSession, paid []*sport.BillItem, unpaid
 	if len(paid) > 0 {
 		sb.WriteString(fmt.Sprintf("✅ **Đã thanh toán (%d người):**\n", len(paid)))
 		for _, item := range paid {
-			sb.WriteString(fmt.Sprintf("• @%s (%d slot - %s VNĐ)\n", item.Username, item.Slots, fund.FormatVND(item.Amount)))
+			nameToDisplay := item.DisplayName
+			if nameToDisplay == "" {
+				nameToDisplay = item.Username
+			}
+			sb.WriteString(fmt.Sprintf("• @%s (%d slot - %s VNĐ)\n", nameToDisplay, item.Slots, fund.FormatVND(item.Amount)))
 		}
 		sb.WriteString("\n")
 	}
@@ -1254,7 +1325,11 @@ func formatBillDashboard(bill *sport.BillSession, paid []*sport.BillItem, unpaid
 	if len(unpaid) > 0 {
 		sb.WriteString(fmt.Sprintf("⏳ **Chưa thanh toán (%d người):**\n", len(unpaid)))
 		for _, item := range unpaid {
-			sb.WriteString(fmt.Sprintf("• @%s (%d slot - %s VNĐ)\n", item.Username, item.Slots, fund.FormatVND(item.Amount)))
+			nameToDisplay := item.DisplayName
+			if nameToDisplay == "" {
+				nameToDisplay = item.Username
+			}
+			sb.WriteString(fmt.Sprintf("• @%s (%d slot - %s VNĐ)\n", nameToDisplay, item.Slots, fund.FormatVND(item.Amount)))
 		}
 	} else {
 		sb.WriteString("🎉 *Toàn bộ thành viên đã hoàn tất đóng tiền! Cảm ơn cả nhà!* 🏸❤️")
@@ -1384,11 +1459,15 @@ func (b *Bot) handleUnpaidCommand(m *mezon.ChannelMessage, rawText string) {
 	sb.WriteString(fmt.Sprintf("👉 Danh sách còn **%d người** chưa thanh toán:\n", len(unpaid)))
 	var mentions []mezon.Mention
 	for _, item := range unpaid {
-		tag := "@" + item.Username
+		nameToDisplay := item.Username
+		if sportMgr != nil {
+			nameToDisplay = sportMgr.ResolveDisplayName(item.UserID, item.Username)
+		}
+		tag := "@" + nameToDisplay
 		sb.WriteString(fmt.Sprintf("• %s (%d slot): **%s VNĐ**\n", tag, item.Slots, fund.FormatVND(item.Amount)))
 		mentions = append(mentions, mezon.Mention{
 			UserID:   item.UserID,
-			Username: item.Username,
+			Username: nameToDisplay,
 		})
 	}
 

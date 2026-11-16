@@ -654,8 +654,8 @@ func TestLeaderboard(t *testing.T) {
 	if !strings.Contains(text, "Tổng số buổi đã tổ chức: **3 buổi**") {
 		t.Errorf("expected 3 matches, got %s", text)
 	}
-	// dai.trinhduc attended 3/3 -> Chiến thần quật cầu
-	if !strings.Contains(text, "👑 **@dai.trinhduc**: 3/3 buổi") || !strings.Contains(text, "Chiến thần quật cầu") {
+	// dai.trinhduc attended 3/3 -> Chiến thần quật cầu (shows Clan Nickname or username)
+	if (!strings.Contains(text, "👑 **@dai.trinhduc**: 3/3 buổi") && !strings.Contains(text, "👑 **@Trịnh Đức Đại**: 3/3 buổi")) || !strings.Contains(text, "Chiến thần quật cầu") {
 		t.Errorf("expected dai.trinhduc as Chien than quat cau, got %s", text)
 	}
 	// sui.master absent 3 times -> Chúa sủi của tháng
