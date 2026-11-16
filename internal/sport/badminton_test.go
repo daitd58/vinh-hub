@@ -13,19 +13,25 @@ import (
 )
 
 type mockSender struct {
-	lastChannel  string
-	lastText     string
-	lastOptions  *mezon.SendOptions
-	sendErr      error
-	invocations  int
+	lastChannel string
+	lastText    string
+	lastOptions *mezon.SendOptions
+	sendErr     error
+	invocations int
+	reactions   []string
 }
 
-func (m *mockSender) SendToChannel(ctx context.Context, channelID string, text string, opts *mezon.SendOptions) error {
+func (m *mockSender) SendToChannel(ctx context.Context, channelID string, text string, opts *mezon.SendOptions) (string, error) {
 	m.lastChannel = channelID
 	m.lastText = text
 	m.lastOptions = opts
 	m.invocations++
-	return m.sendErr
+	return "test-msg-123", m.sendErr
+}
+
+func (m *mockSender) ReactToMessage(ctx context.Context, channelID, messageID, emoji string) error {
+	m.reactions = append(m.reactions, emoji)
+	return nil
 }
 
 func TestNextMatchInfo(t *testing.T) {
@@ -148,6 +154,54 @@ func TestManager_TriggerDiemDanh(t *testing.T) {
 	m := sender.lastOptions.Mentions[0]
 	if m.RoleID != "1840693979155271680" || m.Rolename != "Vinh-CL" {
 		t.Errorf("unexpected mention fields: %+v", m)
+	}
+
+	// Verify auto reactions seeded
+	if len(sender.reactions) != 2 || sender.reactions[0] != "cong1" || sender.reactions[1] != "tru1" {
+		t.Errorf("expected auto reactions [cong1, tru1], got %v", sender.reactions)
+	}
+}
+
+func TestManager_RecordReaction(t *testing.T) {
+	sender := &mockSender{}
+	mgr := NewManager(Config{
+		Enabled:   true,
+		ChannelID: "sport-chan",
+		RoleID:    "1840693979155271680",
+		RoleName:  "Vinh-CL",
+		StatePath: t.TempDir() + "/badminton.json",
+	}, sender)
+
+	// User 1 reacts :cong1: (going)
+	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", false)
+	// User 2 reacts :tru1: (not going)
+	mgr.RecordReaction("sport-chan", "m1", "u2", "hoang.nguyen", ":tru1:", false)
+	// User 3 reacts cong1 (going)
+	mgr.RecordReaction("sport-chan", "m1", "u3", "nam.nguyen", "cong1", false)
+
+	summary := mgr.SummarizeMessages(context.Background(), nil)
+	if len(summary.Going) != 2 {
+		t.Errorf("expected 2 going, got %d: %v", len(summary.Going), summary.Going)
+	}
+	if len(summary.NotGoing) != 1 || summary.NotGoing[0] != "hoang.nguyen" {
+		t.Errorf("expected hoang.nguyen in not going, got %v", summary.NotGoing)
+	}
+
+	// User 2 switches to :cong1:
+	mgr.RecordReaction("sport-chan", "m1", "u2", "hoang.nguyen", ":cong1:", false)
+	summary2 := mgr.SummarizeMessages(context.Background(), nil)
+	if len(summary2.Going) != 3 {
+		t.Errorf("expected 3 going after switch, got %d: %v", len(summary2.Going), summary2.Going)
+	}
+	if len(summary2.NotGoing) != 0 {
+		t.Errorf("expected 0 not going after switch, got %v", summary2.NotGoing)
+	}
+
+	// User 1 removes reaction (undo)
+	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", true)
+	summary3 := mgr.SummarizeMessages(context.Background(), nil)
+	if len(summary3.Going) != 2 {
+		t.Errorf("expected 2 going after un-react, got %d: %v", len(summary3.Going), summary3.Going)
 	}
 }
 

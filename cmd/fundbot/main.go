@@ -142,6 +142,7 @@ func main() {
 		DefaultChannelID: cfg.Mezon.ChannelID,
 		DefaultThreadID:  cfg.Mezon.ThreadID,
 		ThreadName:       cfg.Mezon.ThreadName,
+		SportClanID:      cfg.Sport.ClanID,
 		SportChannelID:   cfg.Sport.ChannelID,
 		FundReader:       fundReader,
 		Timezone:         cfg.Fund.Timezone,

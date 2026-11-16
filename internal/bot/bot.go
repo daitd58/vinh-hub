@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ type Config struct {
 	DefaultChannelID string
 	DefaultThreadID  string
 	ThreadName       string
+	SportClanID      string
 	SportChannelID   string
 	FundReader       fund.BalanceReader
 	Timezone         *time.Location
@@ -102,6 +104,12 @@ func New(cfg Config) (*Bot, error) {
 		}
 	})
 
+	c.On(mezon.EventMessageReaction, func(p any) {
+		if ev, ok := p.(*api.MessageReaction); ok {
+			b.handleMessageReaction(ev)
+		}
+	})
+
 	return b, nil
 }
 
@@ -174,22 +182,132 @@ func (b *Bot) SetSportManager(mgr *sport.Manager) {
 	b.sportMgr = mgr
 }
 
-// SendToChannel sends a message with optional mentions directly to a channel.
-func (b *Bot) SendToChannel(ctx context.Context, channelID string, text string, opts *mezon.SendOptions) error {
+// SendToChannel sends a message with optional mentions directly to a channel,
+// converting markdown bold tags (**) into Mezon `mk` spans and ensuring role mentions are highlighted.
+func (b *Bot) SendToChannel(ctx context.Context, channelID string, text string, opts *mezon.SendOptions) (string, error) {
 	ch, err := b.client.Channels.Fetch(channelID)
 	if err != nil {
-		return fmt.Errorf("fetch channel %s: %w", channelID, err)
+		return "", fmt.Errorf("fetch channel %s: %w", channelID, err)
 	}
-	clanID := "0"
-	if ch.Clan != nil {
+
+	clanID := b.cfg.SportClanID
+	if clanID == "" && ch.Clan != nil {
 		clanID = ch.Clan.ID
 	}
+	if clanID == "" {
+		clanID = "0"
+	}
+
+	// Ensure clan is attached to channel so WriteChatMessage sends the proper ClanId for role mentions
+	if clanID != "0" && (ch.Clan == nil || ch.Clan.ID == "" || ch.Clan.ID == "0") {
+		if clan, ok := b.client.Clans.Get(clanID); ok && clan != nil {
+			ch.Clan = clan
+		}
+	}
+
 	_, _ = b.client.Socket().JoinChat(clanID, ch.ID, ch.ChannelType, !ch.IsPrivate)
 
-	if _, err := ch.Send(mezon.Text(text), opts); err != nil {
-		return fmt.Errorf("send to channel %s: %w", channelID, err)
+	cleanText, mk := ParseMarkdownSpans(text)
+
+	// If there are mentions, update their offsets based on cleanText
+	if opts != nil && len(opts.Mentions) > 0 {
+		for i := range opts.Mentions {
+			tag := ""
+			if opts.Mentions[i].Rolename != "" {
+				tag = "@" + opts.Mentions[i].Rolename
+			} else if opts.Mentions[i].Username != "" {
+				tag = "@" + opts.Mentions[i].Username
+			}
+			if tag != "" {
+				if s, e, ok := mezon.MentionSpan(cleanText, tag); ok {
+					opts.Mentions[i].S = s
+					opts.Mentions[i].E = e
+				}
+			}
+		}
 	}
-	return nil
+
+	var content mezon.Content
+	if len(mk) > 0 {
+		content = map[string]any{
+			"t":  cleanText,
+			"mk": mk,
+		}
+	} else {
+		content = mezon.Text(cleanText)
+	}
+
+	sentMsg, err := ch.Send(content, opts)
+	if err != nil {
+		return "", fmt.Errorf("send to channel %s: %w", channelID, err)
+	}
+	if sentMsg != nil {
+		return sentMsg.ID, nil
+	}
+	return "", nil
+}
+
+// ReactToMessage adds a reaction (e.g. :cong1: or :tru1:) to a message in the channel.
+func (b *Bot) ReactToMessage(ctx context.Context, channelID, messageID, emoji string) error {
+	ch, err := b.client.Channels.Fetch(channelID)
+	if err != nil {
+		return err
+	}
+
+	clanID := b.cfg.SportClanID
+	if clanID == "" && ch.Clan != nil {
+		clanID = ch.Clan.ID
+	}
+
+	data := mezon.ReactMessageData{
+		ClanID:       clanID,
+		ChannelID:    channelID,
+		ChannelType:  ch.ChannelType,
+		Mode:         int(mezon.ConvertChannelTypeToChannelMode(ch.ChannelType)),
+		IsPublic:     !ch.IsPrivate,
+		MessageID:    messageID,
+		Emoji:        emoji,
+		Count:        1,
+		ActionDelete: false,
+	}
+
+	_, err = b.client.Socket().WriteMessageReaction(data)
+	return err
+}
+
+func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	sportChan := b.cfg.SportChannelID
+	botID := b.cfg.BotID
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		return
+	}
+
+	chanID := strconv.FormatInt(ev.ChannelId, 10)
+	if sportChan != "" && chanID != sportChan {
+		return
+	}
+
+	senderID := strconv.FormatInt(ev.SenderId, 10)
+	// Ignore reactions from the bot itself (e.g. initial seeding)
+	if botID != "" && senderID == botID {
+		return
+	}
+
+	msgID := strconv.FormatInt(ev.MessageId, 10)
+	senderName := ev.SenderName
+	if senderName == "" {
+		if u, err := b.client.Users.Fetch(senderID); err == nil && u != nil && u.Username != "" {
+			senderName = u.Username
+		} else {
+			senderName = senderID
+		}
+	}
+
+	sportMgr.RecordReaction(chanID, msgID, senderID, senderName, ev.Emoji, ev.Action)
 }
 
 // SendToThread sends a message to a thread or fallback channel.
@@ -333,7 +451,6 @@ func (b *Bot) handleDiemDanhCommand(m *mezon.ChannelMessage) {
 		_ = b.reply(m, fmt.Sprintf("Lỗi gửi điểm danh: %v", err))
 		return
 	}
-	_ = b.reply(m, "Đã gửi thông báo điểm danh cho buổi đánh tiếp theo! 🏸")
 }
 
 func (b *Bot) handleNhacLichCommand(m *mezon.ChannelMessage) {
@@ -350,7 +467,6 @@ func (b *Bot) handleNhacLichCommand(m *mezon.ChannelMessage) {
 		_ = b.reply(m, fmt.Sprintf("Lỗi nhắc lịch: %v", err))
 		return
 	}
-	_ = b.reply(m, "Đã gửi nhắc lịch kèm tổng kết điểm danh! 🏸")
 }
 
 func (b *Bot) handleSummaryCommand(m *mezon.ChannelMessage) {
@@ -395,14 +511,58 @@ func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 	_ = b.reply(m, help)
 }
 
+var reBold = regexp.MustCompile(`\*\*(.+?)\*\*`)
+
+// ParseMarkdownSpans removes `**...**` markers and converts them into Mezon `mk` bold spans.
+func ParseMarkdownSpans(text string) (string, []map[string]any) {
+	if !strings.Contains(text, "**") {
+		return text, nil
+	}
+
+	var clean strings.Builder
+	var spans []map[string]any
+	last := 0
+
+	indices := reBold.FindAllStringSubmatchIndex(text, -1)
+	for _, idx := range indices {
+		clean.WriteString(text[last:idx[0]])
+
+		startU16 := mezon.UTF16Len(clean.String())
+		inner := text[idx[2]:idx[3]]
+		clean.WriteString(inner)
+		endU16 := mezon.UTF16Len(clean.String())
+
+		spans = append(spans, map[string]any{
+			"type": "b",
+			"s":    startU16,
+			"e":    endU16,
+		})
+
+		last = idx[1]
+	}
+
+	clean.WriteString(text[last:])
+	return clean.String(), spans
+}
+
 func (b *Bot) reply(m *mezon.ChannelMessage, text string) error {
-	content := mezon.Text(text)
+	cleanText, mk := ParseMarkdownSpans(text)
+	var content any
+	if len(mk) > 0 {
+		content = map[string]any{
+			"t":  cleanText,
+			"mk": mk,
+		}
+	} else {
+		content = mezon.Text(cleanText)
+	}
+
 	channelID := m.ChannelID
 	topicID := m.TopicID
 
 	// Reply to same thread or channel
 	if topicID != "" {
-		return b.SendToThread(context.Background(), channelID, topicID, text)
+		return b.SendToThread(context.Background(), channelID, topicID, cleanText)
 	}
 
 	ch, err := b.client.Channels.Fetch(channelID)

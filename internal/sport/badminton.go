@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,14 +30,17 @@ type MessageRecord struct {
 
 // AttendanceState persists the current check-in session and recent messages.
 type AttendanceState struct {
-	SessionID    string          `json:"session_id"`    // e.g. "match-2026-11-17"
-	CallTime     time.Time       `json:"call_time"`     // when check-in was triggered
-	MatchDay     string          `json:"match_day"`     // e.g. "Thứ Ba"
-	MatchDate    string          `json:"match_date"`    // e.g. "17/11/2026"
-	MatchTime    string          `json:"match_time"`    // e.g. "18:00"
-	LastDiemDanh string          `json:"last_diemdanh"` // e.g. "2026-11-16_09"
-	LastReminder string          `json:"last_reminder"` // e.g. "2026-11-17_17"
-	Messages     []MessageRecord `json:"messages"`
+	SessionID         string            `json:"session_id"`          // e.g. "match-2026-11-17"
+	CallTime          time.Time         `json:"call_time"`           // when check-in was triggered
+	DiemDanhMessageID string            `json:"diemdanh_message_id"` // message ID of the attendance call
+	MatchDay          string            `json:"match_day"`           // e.g. "Thứ Ba"
+	MatchDate         string            `json:"match_date"`          // e.g. "17/11/2026"
+	MatchTime         string            `json:"match_time"`          // e.g. "18:00"
+	LastDiemDanh      string            `json:"last_diemdanh"`       // e.g. "2026-11-16_09"
+	LastReminder      string            `json:"last_reminder"`       // e.g. "2026-11-17_17"
+	Messages          []MessageRecord   `json:"messages"`
+	ReactionsGoing    map[string]string `json:"reactions_going"`     // userID -> username (:cong1:)
+	ReactionsNotGoing map[string]string `json:"reactions_not_going"` // userID -> username (:tru1:)
 }
 
 // SummaryResult contains the parsed attendance details.
@@ -66,7 +70,8 @@ type Config struct {
 
 // MessageSender sends messages with optional mentions to a Mezon channel.
 type MessageSender interface {
-	SendToChannel(ctx context.Context, channelID string, text string, opts *mezon.SendOptions) error
+	SendToChannel(ctx context.Context, channelID string, text string, opts *mezon.SendOptions) (string, error)
+	ReactToMessage(ctx context.Context, channelID, messageID, emoji string) error
 }
 
 // Manager coordinates badminton attendance schedules, message recording, and AI summaries.
@@ -118,14 +123,23 @@ func (m *Manager) loadState() {
 	if err == nil {
 		var s AttendanceState
 		if json.Unmarshal(data, &s) == nil {
+			if s.ReactionsGoing == nil {
+				s.ReactionsGoing = make(map[string]string)
+			}
+			if s.ReactionsNotGoing == nil {
+				s.ReactionsNotGoing = make(map[string]string)
+			}
 			m.state = s
 			m.log.Info("loaded badminton attendance state",
-				"session", s.SessionID, "messages", len(s.Messages))
+				"session", s.SessionID, "messages", len(s.Messages),
+				"reactions_going", len(s.ReactionsGoing), "reactions_not_going", len(s.ReactionsNotGoing))
 			return
 		}
 	}
 	m.state = AttendanceState{
-		Messages: make([]MessageRecord, 0),
+		Messages:          make([]MessageRecord, 0),
+		ReactionsGoing:    make(map[string]string),
+		ReactionsNotGoing: make(map[string]string),
 	}
 }
 
@@ -134,6 +148,57 @@ func (m *Manager) saveStateLocked() {
 	if err == nil {
 		_ = os.WriteFile(m.cfg.StatePath, data, 0644)
 	}
+}
+
+// RecordReaction registers a member reaction (:cong1: or :tru1:) to the attendance post.
+func (m *Manager) RecordReaction(channelID, messageID, userID, username, emoji string, isRemove bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.cfg.ChannelID != "" && channelID != m.cfg.ChannelID {
+		return
+	}
+
+	cleanEmoji := strings.ToLower(strings.Trim(emoji, ":"))
+	isGoing := strings.Contains(cleanEmoji, "cong1") || cleanEmoji == "+1" || cleanEmoji == "👍"
+	isNotGoing := strings.Contains(cleanEmoji, "tru1") || cleanEmoji == "-1" || cleanEmoji == "👎"
+
+	if !isGoing && !isNotGoing {
+		return
+	}
+
+	if m.state.ReactionsGoing == nil {
+		m.state.ReactionsGoing = make(map[string]string)
+	}
+	if m.state.ReactionsNotGoing == nil {
+		m.state.ReactionsNotGoing = make(map[string]string)
+	}
+
+	name := username
+	if name == "" {
+		name = userID
+	}
+
+	if isRemove {
+		if isGoing {
+			delete(m.state.ReactionsGoing, userID)
+		}
+		if isNotGoing {
+			delete(m.state.ReactionsNotGoing, userID)
+		}
+	} else {
+		if isGoing {
+			m.state.ReactionsGoing[userID] = name
+			delete(m.state.ReactionsNotGoing, userID)
+		} else if isNotGoing {
+			m.state.ReactionsNotGoing[userID] = name
+			delete(m.state.ReactionsGoing, userID)
+		}
+	}
+
+	m.saveStateLocked()
+	m.log.Info("recorded sport reaction", "user", name, "emoji", emoji, "is_remove", isRemove,
+		"going_count", len(m.state.ReactionsGoing), "not_going_count", len(m.state.ReactionsNotGoing))
 }
 
 // RecordMessage stores incoming channel messages for the current attendance session.
@@ -365,8 +430,11 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 	m.state.MatchDay = matchDay
 	m.state.MatchDate = matchDate
 	m.state.MatchTime = matchTime
-	// Clear previous session messages to start fresh attendance collection
+	m.state.DiemDanhMessageID = ""
+	// Clear previous session messages and reactions to start fresh attendance collection
 	m.state.Messages = make([]MessageRecord, 0)
+	m.state.ReactionsGoing = make(map[string]string)
+	m.state.ReactionsNotGoing = make(map[string]string)
 	m.saveStateLocked()
 	m.mu.Unlock()
 
@@ -374,11 +442,30 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 	msg := fmt.Sprintf(
 		"🏸 **[ĐIỂM DANH CẦU LÔNG - %s (%s)]**\n\n"+
 			"Chào cả nhà %s! Lịch đánh cầu lông tiếp theo diễn ra vào **%s (%s)** (khung giờ dự kiến: **%s**).\n\n"+
-			"👉 Mọi người vào điểm danh xác nhận tham gia (+1 / đi / bận / off) trước **16:00** chiều nay/ngày mai để tiện chốt người và đặt sân nhé! 🔥",
+			"👉 Mọi người vào điểm danh xác nhận tham gia (+1 / đi / bận / off) trước **16:00** chiều nay để tiện chốt người và đặt sân nhé! 🔥\n\n"+
+			"*(Đi thì react :cong1:, không đi thì react :tru1: vào tin nhắn này nhé!)*",
 		strings.ToUpper(matchDay), matchDate, tag, matchDay, matchDate, matchTime,
 	)
 
-	return m.sendWithRoleMention(ctx, msg)
+	msgID, err := m.sendWithRoleMention(ctx, msg)
+	if err != nil {
+		return err
+	}
+
+	if msgID != "" {
+		m.mu.Lock()
+		m.state.DiemDanhMessageID = msgID
+		m.saveStateLocked()
+		m.mu.Unlock()
+
+		// Auto-react with :cong1: and :tru1: to seed the buttons for members to click
+		if m.sender != nil {
+			_ = m.sender.ReactToMessage(ctx, m.cfg.ChannelID, msgID, "cong1")
+			_ = m.sender.ReactToMessage(ctx, m.cfg.ChannelID, msgID, "tru1")
+		}
+	}
+
+	return nil
 }
 
 // TriggerReminder compiles an AI summary of attendance messages and sends a 1-hour pre-match reminder.
@@ -452,19 +539,33 @@ func (m *Manager) TriggerReminderWithTime(ctx context.Context, now time.Time, ma
 
 	sb.WriteString("\nChúc anh em một buổi giao lưu quật cầu thật cháy và nhiều tiếng cười! 🔥💪")
 
-	return m.sendWithRoleMention(ctx, sb.String())
+	_, err := m.sendWithRoleMention(ctx, sb.String())
+	return err
 }
 
-// SummarizeMessages produces a summary using OpenAI if available, then Gemini, or the NLP rule-based parser.
+// SummarizeMessages produces a summary using OpenAI if available, then Gemini, or the NLP rule-based parser merged with reactions.
 func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecord) SummaryResult {
-	if len(messages) == 0 {
+	m.mu.Lock()
+	var goingReactions, notGoingReactions []string
+	for _, uname := range m.state.ReactionsGoing {
+		goingReactions = append(goingReactions, uname)
+	}
+	for _, uname := range m.state.ReactionsNotGoing {
+		notGoingReactions = append(notGoingReactions, uname)
+	}
+	m.mu.Unlock()
+
+	sort.Strings(goingReactions)
+	sort.Strings(notGoingReactions)
+
+	if len(messages) == 0 && len(goingReactions) == 0 && len(notGoingReactions) == 0 {
 		return SummaryResult{
 			CourtInfo: "Chưa có thông tin sân",
 		}
 	}
 
 	if m.cfg.OpenAIKey != "" {
-		aiText, err := m.callOpenAISummary(ctx, messages)
+		aiText, err := m.callOpenAISummary(ctx, messages, goingReactions, notGoingReactions)
 		if err == nil && strings.TrimSpace(aiText) != "" {
 			return SummaryResult{
 				RawAI: aiText,
@@ -476,7 +577,7 @@ func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecor
 	}
 
 	if m.cfg.GeminiKey != "" {
-		aiText, err := m.callGeminiSummary(ctx, messages)
+		aiText, err := m.callGeminiSummary(ctx, messages, goingReactions, notGoingReactions)
 		if err == nil && strings.TrimSpace(aiText) != "" {
 			return SummaryResult{
 				RawAI: aiText,
@@ -487,8 +588,46 @@ func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecor
 		}
 	}
 
-	// Fallback to Rule-based NLP Parser
-	return ParseMessagesNLP(messages)
+	// Fallback to Rule-based NLP Parser merged with reactions
+	nlpRes := ParseMessagesNLP(messages)
+
+	goingMap := make(map[string]bool)
+	notGoingMap := make(map[string]bool)
+
+	for _, u := range goingReactions {
+		goingMap[u] = true
+	}
+	for _, u := range notGoingReactions {
+		notGoingMap[u] = true
+	}
+
+	for _, u := range nlpRes.Going {
+		delete(notGoingMap, u)
+		goingMap[u] = true
+	}
+	for _, u := range nlpRes.NotGoing {
+		delete(goingMap, u)
+		notGoingMap[u] = true
+	}
+
+	var going []string
+	for u := range goingMap {
+		going = append(going, u)
+	}
+	sort.Strings(going)
+
+	var notGoing []string
+	for u := range notGoingMap {
+		notGoing = append(notGoing, u)
+	}
+	sort.Strings(notGoing)
+
+	return SummaryResult{
+		Going:     going,
+		NotGoing:  notGoing,
+		CourtInfo: nlpRes.CourtInfo,
+		Notes:     nlpRes.Notes,
+	}
 }
 
 // ParseMessagesNLP extracts attendance, absences, and court info using Vietnamese badminton patterns.
@@ -553,16 +692,36 @@ func ParseMessagesNLP(messages []MessageRecord) SummaryResult {
 	}
 }
 
-func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecord) (string, error) {
-	var chatLines []string
-	for _, msg := range messages {
-		name := msg.Username
-		if name == "" {
-			name = msg.UserID
+func (m *Manager) buildTranscript(messages []MessageRecord, goingReactions, notGoingReactions []string) string {
+	var sb strings.Builder
+
+	if len(goingReactions) > 0 || len(notGoingReactions) > 0 {
+		sb.WriteString("Danh sách điểm danh qua reaction tin nhắn:\n")
+		if len(goingReactions) > 0 {
+			sb.WriteString(fmt.Sprintf("- Đã react :cong1: (tham gia - %d người): %s\n", len(goingReactions), strings.Join(goingReactions, ", ")))
 		}
-		chatLines = append(chatLines, fmt.Sprintf("- %s: %s", name, msg.Content))
+		if len(notGoingReactions) > 0 {
+			sb.WriteString(fmt.Sprintf("- Đã react :tru1: (vắng mặt/bận - %d người): %s\n", len(notGoingReactions), strings.Join(notGoingReactions, ", ")))
+		}
+		sb.WriteString("\n")
 	}
-	transcript := strings.Join(chatLines, "\n")
+
+	if len(messages) > 0 {
+		sb.WriteString("Tin nhắn trò chuyện trong nhóm chat:\n")
+		for _, msg := range messages {
+			name := msg.Username
+			if name == "" {
+				name = msg.UserID
+			}
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", name, msg.Content))
+		}
+	}
+
+	return sb.String()
+}
+
+func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecord, goingReactions, notGoingReactions []string) (string, error) {
+	transcript := m.buildTranscript(messages, goingReactions, notGoingReactions)
 
 	baseURL := m.cfg.OpenAIBaseURL
 	if baseURL == "" {
@@ -580,15 +739,15 @@ func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecor
 		"messages": []map[string]string{
 			{
 				"role": "system",
-				"content": "Bạn là trợ lý cho câu lạc bộ cầu lông Vinh-CL. Dựa vào các tin nhắn được cung cấp, hãy tóm tắt ngắn gọn và rõ ràng tình hình đánh cầu bằng tiếng Việt theo các gạch đầu dòng sau:\n" +
-					"• ✅ **Tham gia (số lượng):** [Liệt kê tên những người xác nhận đi]\n" +
-					"• ❌ **Vắng mặt:** [Liệt kê tên những người xin nghỉ/bận, nếu có]\n" +
+				"content": "Bạn là trợ lý cho câu lạc bộ cầu lông Vinh-CL. Dựa vào danh sách reaction và tin nhắn trong nhóm chat, hãy tóm tắt ngắn gọn và rõ ràng tình hình đánh cầu bằng tiếng Việt theo các gạch đầu dòng sau:\n" +
+					"• ✅ **Tham gia (số lượng):** [Liệt kê tên những người xác nhận đi qua reaction :cong1: hoặc chat]\n" +
+					"• ❌ **Vắng mặt:** [Liệt kê tên những người xin nghỉ/bận qua reaction :tru1: hoặc chat, nếu có]\n" +
 					"• 🏟️ **Sân bãi:** [Thông tin sân đã đặt nào hoặc chưa/k có sân, giờ chơi nếu có]\n" +
 					"Chỉ trả về nội dung gạch đầu dòng ngắn gọn, súc tích, không thêm lời chào hay giải thích rườm rà.",
 			},
 			{
 				"role":    "user",
-				"content": fmt.Sprintf("Dưới đây là các tin nhắn trong nhóm chat:\n\n%s", transcript),
+				"content": fmt.Sprintf("Dưới đây là thông tin điểm danh và tin nhắn nhóm:\n\n%s", transcript),
 			},
 		},
 		"temperature": 0.3,
@@ -640,22 +799,14 @@ func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecor
 	return "", fmt.Errorf("empty openai choices response")
 }
 
-func (m *Manager) callGeminiSummary(ctx context.Context, messages []MessageRecord) (string, error) {
-	var chatLines []string
-	for _, msg := range messages {
-		name := msg.Username
-		if name == "" {
-			name = msg.UserID
-		}
-		chatLines = append(chatLines, fmt.Sprintf("- %s: %s", name, msg.Content))
-	}
-	transcript := strings.Join(chatLines, "\n")
+func (m *Manager) callGeminiSummary(ctx context.Context, messages []MessageRecord, goingReactions, notGoingReactions []string) (string, error) {
+	transcript := m.buildTranscript(messages, goingReactions, notGoingReactions)
 
 	prompt := fmt.Sprintf(
-		"Dưới đây là các tin nhắn trong nhóm chat câu lạc bộ cầu lông Vinh-CL:\n\n%s\n\n"+
+		"Dưới đây là thông tin điểm danh và tin nhắn trong nhóm chat câu lạc bộ cầu lông Vinh-CL:\n\n%s\n\n"+
 			"Hãy tóm tắt ngắn gọn và rõ ràng tình hình đánh cầu bằng tiếng Việt theo các gạch đầu dòng sau:\n"+
-			"• ✅ **Tham gia (số lượng):** [Liệt kê tên những người xác nhận đi]\n"+
-			"• ❌ **Vắng mặt:** [Liệt kê tên những người xin nghỉ/bận, nếu có]\n"+
+			"• ✅ **Tham gia (số lượng):** [Liệt kê tên những người xác nhận đi qua reaction :cong1: hoặc chat]\n"+
+			"• ❌ **Vắng mặt:** [Liệt kê tên những người xin nghỉ/bận qua reaction :tru1: hoặc chat, nếu có]\n"+
 			"• 🏟️ **Sân bãi:** [Thông tin sân đã đặt nào hoặc chưa/k có sân]\n"+
 			"Chỉ trả về nội dung gạch đầu dòng ngắn gọn, không rườm rà.",
 		transcript,
@@ -716,10 +867,10 @@ func (m *Manager) callGeminiSummary(ctx context.Context, messages []MessageRecor
 	return "", fmt.Errorf("empty gemini response")
 }
 
-func (m *Manager) sendWithRoleMention(ctx context.Context, text string) error {
+func (m *Manager) sendWithRoleMention(ctx context.Context, text string) (string, error) {
 	if m.sender == nil {
 		m.log.Warn("no message sender configured for sport manager")
-		return nil
+		return "", nil
 	}
 
 	var opts *mezon.SendOptions
