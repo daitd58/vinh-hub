@@ -29,6 +29,10 @@ func (m *mockTxSender) GetAccount(_ context.Context, addr string) (client.Accoun
 	}, nil
 }
 
+func (m *mockTxSender) GetCurrentNonce(_ context.Context, _ string, _ string) (uint64, error) {
+	return m.nonce, nil
+}
+
 func (m *mockTxSender) AddTx(_ context.Context, tx client.SignedTx) (client.AddTxResponse, error) {
 	m.sentTxs = append(m.sentTxs, tx)
 	m.nonce++

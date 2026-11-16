@@ -25,6 +25,7 @@ import (
 // TxSender defines the interface for interacting with MMN node transactions.
 type TxSender interface {
 	GetAccount(ctx context.Context, addr string) (client.Account, error)
+	GetCurrentNonce(ctx context.Context, addr string, tag string) (uint64, error)
 	AddTx(ctx context.Context, tx client.SignedTx) (client.AddTxResponse, error)
 	Close() error
 }
@@ -484,13 +485,20 @@ func (f *Forwarder) nextNonce(ctx context.Context) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	account, err := f.sender.GetAccount(ctx, f.botAddr)
+	// Query current pending nonce from the node (preferred for transaction sequencing)
+	currentNonce, err := f.sender.GetCurrentNonce(ctx, f.botAddr, "pending")
 	if err != nil {
-		return 0, fmt.Errorf("query account nonce: %w", err)
+		if latest, lerr := f.sender.GetCurrentNonce(ctx, f.botAddr, "latest"); lerr == nil {
+			currentNonce = latest
+		} else if acc, aerr := f.sender.GetAccount(ctx, f.botAddr); aerr == nil {
+			currentNonce = acc.Nonce
+		} else {
+			return 0, fmt.Errorf("query account nonce: %w", err)
+		}
 	}
 
-	if account.Nonce > f.lastNonce {
-		f.lastNonce = account.Nonce
+	if currentNonce > f.lastNonce {
+		f.lastNonce = currentNonce
 	}
 	f.lastNonce++
 	return f.lastNonce, nil
