@@ -50,15 +50,18 @@ type SummaryResult struct {
 
 // Config configures the badminton manager.
 type Config struct {
-	Enabled   bool
-	ClanID    string
-	ChannelID string
-	RoleID    string
-	RoleName  string
-	StatePath string
-	GeminiKey string
-	Timezone  *time.Location
-	Log       *slog.Logger
+	Enabled       bool
+	ClanID        string
+	ChannelID     string
+	RoleID        string
+	RoleName      string
+	StatePath     string
+	OpenAIKey     string
+	OpenAIBaseURL string
+	OpenAIModel   string
+	GeminiKey     string
+	Timezone      *time.Location
+	Log           *slog.Logger
 }
 
 // MessageSender sends messages with optional mentions to a Mezon channel.
@@ -452,7 +455,7 @@ func (m *Manager) TriggerReminderWithTime(ctx context.Context, now time.Time, ma
 	return m.sendWithRoleMention(ctx, sb.String())
 }
 
-// SummarizeMessages produces a summary using Gemini if available, or the NLP rule-based parser.
+// SummarizeMessages produces a summary using OpenAI if available, then Gemini, or the NLP rule-based parser.
 func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecord) SummaryResult {
 	if len(messages) == 0 {
 		return SummaryResult{
@@ -460,11 +463,27 @@ func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecor
 		}
 	}
 
-	if m.cfg.GeminiKey != "" {
-		if aiText, err := m.callGeminiSummary(ctx, messages); err == nil && strings.TrimSpace(aiText) != "" {
+	if m.cfg.OpenAIKey != "" {
+		aiText, err := m.callOpenAISummary(ctx, messages)
+		if err == nil && strings.TrimSpace(aiText) != "" {
 			return SummaryResult{
 				RawAI: aiText,
 			}
+		}
+		if err != nil {
+			m.log.Warn("failed to call openai summary, falling back", "err", err)
+		}
+	}
+
+	if m.cfg.GeminiKey != "" {
+		aiText, err := m.callGeminiSummary(ctx, messages)
+		if err == nil && strings.TrimSpace(aiText) != "" {
+			return SummaryResult{
+				RawAI: aiText,
+			}
+		}
+		if err != nil {
+			m.log.Warn("failed to call gemini summary, falling back", "err", err)
 		}
 	}
 
@@ -532,6 +551,93 @@ func ParseMessagesNLP(messages []MessageRecord) SummaryResult {
 		CourtInfo: courtInfo,
 		Notes:     notes,
 	}
+}
+
+func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecord) (string, error) {
+	var chatLines []string
+	for _, msg := range messages {
+		name := msg.Username
+		if name == "" {
+			name = msg.UserID
+		}
+		chatLines = append(chatLines, fmt.Sprintf("- %s: %s", name, msg.Content))
+	}
+	transcript := strings.Join(chatLines, "\n")
+
+	baseURL := m.cfg.OpenAIBaseURL
+	if baseURL == "" {
+		baseURL = "https://llm.mrdnd.dev/v1"
+	}
+	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
+
+	model := m.cfg.OpenAIModel
+	if model == "" {
+		model = "gpt-4o-mini"
+	}
+
+	payload := map[string]any{
+		"model": model,
+		"messages": []map[string]string{
+			{
+				"role": "system",
+				"content": "Bạn là trợ lý cho câu lạc bộ cầu lông Vinh-CL. Dựa vào các tin nhắn được cung cấp, hãy tóm tắt ngắn gọn và rõ ràng tình hình đánh cầu bằng tiếng Việt theo các gạch đầu dòng sau:\n" +
+					"• ✅ **Tham gia (số lượng):** [Liệt kê tên những người xác nhận đi]\n" +
+					"• ❌ **Vắng mặt:** [Liệt kê tên những người xin nghỉ/bận, nếu có]\n" +
+					"• 🏟️ **Sân bãi:** [Thông tin sân đã đặt nào hoặc chưa/k có sân, giờ chơi nếu có]\n" +
+					"Chỉ trả về nội dung gạch đầu dòng ngắn gọn, súc tích, không thêm lời chào hay giải thích rườm rà.",
+			},
+			{
+				"role":    "user",
+				"content": fmt.Sprintf("Dưới đây là các tin nhắn trong nhóm chat:\n\n%s", transcript),
+			},
+		},
+		"temperature": 0.3,
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if m.cfg.OpenAIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+m.cfg.OpenAIKey)
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("openai api HTTP %d: %s", resp.StatusCode, string(b))
+	}
+
+	var openAIResp struct {
+		Choices []struct {
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&openAIResp); err != nil {
+		return "", err
+	}
+
+	if len(openAIResp.Choices) > 0 {
+		return strings.TrimSpace(openAIResp.Choices[0].Message.Content), nil
+	}
+
+	return "", fmt.Errorf("empty openai choices response")
 }
 
 func (m *Manager) callGeminiSummary(ctx context.Context, messages []MessageRecord) (string, error) {

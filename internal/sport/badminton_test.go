@@ -2,6 +2,9 @@ package sport
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -184,5 +187,64 @@ func TestManager_TriggerReminder(t *testing.T) {
 	}
 	if !strings.Contains(sender.lastText, "sân 3 sân 4 nha") {
 		t.Errorf("expected court info in reminder, got %q", sender.lastText)
+	}
+}
+
+func TestManager_OpenAISummary(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Errorf("unexpected auth header: %s", r.Header.Get("Authorization"))
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var reqBody map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Errorf("failed to decode request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if reqBody["model"] != "gpt-4o-mini" {
+			t.Errorf("unexpected model: %v", reqBody["model"])
+		}
+
+		resp := map[string]any{
+			"choices": []map[string]any{
+				{
+					"message": map[string]string{
+						"role":    "assistant",
+						"content": "• ✅ **Tham gia (2 người):** a.nguyen, b.tran\n• ❌ **Vắng mặt:** c.le\n• 🏟️ **Sân bãi:** Sân Minh Hải 19:30",
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	sender := &mockSender{}
+	mgr := NewManager(Config{
+		Enabled:       true,
+		ChannelID:     "test-chan",
+		RoleID:        "1840693979155271680",
+		RoleName:      "Vinh-CL",
+		StatePath:     t.TempDir() + "/badminton.json",
+		OpenAIKey:     "test-key",
+		OpenAIBaseURL: ts.URL,
+		OpenAIModel:   "gpt-4o-mini",
+	}, sender)
+
+	mgr.RecordMessage("test-chan", "m1", "u1", "a.nguyen", "+1")
+	mgr.RecordMessage("test-chan", "m2", "u2", "b.tran", "+1")
+	mgr.RecordMessage("test-chan", "m3", "u3", "c.le", "bận")
+
+	summary := mgr.SummarizeMessages(context.Background(), mgr.state.Messages)
+	if !strings.Contains(summary.RawAI, "Sân Minh Hải 19:30") {
+		t.Errorf("expected OpenAI response in RawAI, got %q", summary.RawAI)
 	}
 }

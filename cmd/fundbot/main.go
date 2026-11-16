@@ -191,15 +191,18 @@ func main() {
 	// Run Badminton & Sport Scheduler
 	if cfg.Sport.Enabled {
 		sportMgr := sport.NewManager(sport.Config{
-			Enabled:   cfg.Sport.Enabled,
-			ClanID:    cfg.Sport.ClanID,
-			ChannelID: cfg.Sport.ChannelID,
-			RoleID:    cfg.Sport.RoleID,
-			RoleName:  cfg.Sport.RoleName,
-			StatePath: cfg.Sport.StatePath,
-			GeminiKey: cfg.Sport.GeminiKey,
-			Timezone:  cfg.Fund.Timezone,
-			Log:       logger,
+			Enabled:       cfg.Sport.Enabled,
+			ClanID:        cfg.Sport.ClanID,
+			ChannelID:     cfg.Sport.ChannelID,
+			RoleID:        cfg.Sport.RoleID,
+			RoleName:      cfg.Sport.RoleName,
+			StatePath:     cfg.Sport.StatePath,
+			OpenAIKey:     cfg.Sport.OpenAIKey,
+			OpenAIBaseURL: cfg.Sport.OpenAIBaseURL,
+			OpenAIModel:   cfg.Sport.OpenAIModel,
+			GeminiKey:     cfg.Sport.GeminiKey,
+			Timezone:      cfg.Fund.Timezone,
+			Log:           logger,
 		}, mezonBot)
 
 		mezonBot.SetSportManager(sportMgr)

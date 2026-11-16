@@ -24,13 +24,16 @@ type Config struct {
 
 // SportConfig holds settings for badminton attendance and match reminders.
 type SportConfig struct {
-	Enabled   bool
-	ClanID    string
-	ChannelID string
-	RoleID    string
-	RoleName  string
-	StatePath string
-	GeminiKey string
+	Enabled       bool
+	ClanID        string
+	ChannelID     string
+	RoleID        string
+	RoleName      string
+	StatePath     string
+	OpenAIKey     string
+	OpenAIBaseURL string
+	OpenAIModel   string
+	GeminiKey     string
 }
 
 // BotWalletConfig holds settings for the intermediary bot wallet.
@@ -125,6 +128,9 @@ func Load() *Config {
 	cfg.Sport.RoleID = strings.TrimSpace(env("SPORT_ROLE_ID", "1840693979155271680"))
 	cfg.Sport.RoleName = strings.TrimSpace(env("SPORT_ROLE_NAME", "Vinh-CL"))
 	cfg.Sport.StatePath = env("SPORT_STATE_PATH", "badminton_state.json")
+	cfg.Sport.OpenAIKey = strings.TrimSpace(env("OPENAI_API_KEY", ""))
+	cfg.Sport.OpenAIBaseURL = strings.TrimSpace(env("OPENAI_BASE_URL", "https://llm.mrdnd.dev/v1"))
+	cfg.Sport.OpenAIModel = strings.TrimSpace(env("OPENAI_MODEL", "gpt-4o-mini"))
 	cfg.Sport.GeminiKey = strings.TrimSpace(env("GEMINI_API_KEY", ""))
 
 	// App

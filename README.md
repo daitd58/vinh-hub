@@ -16,11 +16,13 @@ A real-time Mezon bot that monitors wallet transactions on the **Mezon Đồng**
   - Caches readings for 5 minutes and falls back to stale readings if the indexer is temporarily unreachable.
 - **Badminton Attendance & AI Summary Reminders (`@Vinh-CL`)**:
   - **Auto Điểm danh (Attendance Call)**: 09:00 sáng Thứ 2 (cho Thứ 3), Thứ 4 (cho Thứ 5), Thứ 6 (cho Thứ 7), tự động ping role `@Vinh-CL` (`1840693979155271680`).
-  - **Nhắc lịch trước 1 tiếng**: Thứ 3 & Thứ 5 lúc 17:00 (đánh 18:00), Thứ 7 lúc 13:00 (đánh 14:00).
-  - **AI Message Summary**: Thu thập và tóm tắt toàn bộ tin nhắn từ khi điểm danh:
-    - Danh sách người tham gia (+1 / đi / có mặt)
-    - Danh sách người xin nghỉ (off / bận)
-    - Thông tin sân bãi (sân 1, 2, Minh Hải,... hoặc chưa có sân)
+  - **Nhắc lịch trước 1 tiếng linh hoạt theo giờ đặt sân**:
+    - Thứ 3 & Thứ 5: Nhóm thường đặt sân lúc 19:00 hoặc 19:30 (hoặc chênh lệch 30 phút). Bot tự động đọc lịch sử chat để nhận diện giờ đặt sân thực tế và nhắc trước **1 tiếng** (18:00 nếu đá 19:00, 18:30 nếu đá 19:30).
+    - Thứ 7: Thường đánh lúc 14:00 (hoặc 13:30), nhắc trước 1 tiếng (13:00 / 12:30).
+  - **AI Message Summary (OpenAI / Gemini / NLP)**:
+    - Thu thập tin nhắn từ kênh chat kể từ lúc điểm danh đến lúc nhắc lịch.
+    - Hỗ trợ OpenAI-compatible API (`OPENAI_API_KEY`, `OPENAI_BASE_URL="https://llm.mrdnd.dev/v1"`, `OPENAI_MODEL="gpt-4o-mini"`) hoặc `GEMINI_API_KEY`, fallback về rule-based NLP parser nếu chưa cấu hình API key.
+    - Tóm tắt danh sách người tham gia (`+1`, `đi`), vắng mặt (`off`, `bận`), và sân bãi (`Minh Hải`, `sân 1, 2`,...).
 - **Thread-Aware Mezon Bot**:
   - Connects to Mezon gateway using [`github.com/quangledang23/mezon-sdk-go`](https://github.com/quangledang23/mezon-sdk-go).
   - Posts updates directly into a target **Thread** (`MEZON_THREAD_ID`), or auto-creates/finds a thread under a parent channel (`MEZON_CHANNEL_ID`).
@@ -129,6 +131,16 @@ Settings are loaded from `.env` in the project root:
 | `MMN_CHAIN_ID` | No | Chain ID for indexer, default `1337` |
 | `TIMEZONE` | No | Timezone for post timestamps, default `Asia/Ho_Chi_Minh` |
 | `COURIER_INTERVAL` | No | Interval in seconds between outbox delivery sweeps, default `30` |
+| `SPORT_ENABLED` | No | Enable badminton attendance & reminder scheduler, default `true` |
+| `SPORT_CLAN_ID` | No | Clan ID of KOMU, default `1779484504377790464` |
+| `SPORT_CHANNEL_ID` | No | Sport channel ID (Vinh-sport-club), default `1840689219983380480` |
+| `SPORT_ROLE_ID` | No | Role ID of `@Vinh-CL` to mention, default `1840693979155271680` |
+| `SPORT_ROLE_NAME` | No | Role name to display, default `Vinh-CL` |
+| `SPORT_STATE_PATH` | No | Path to persist attendance messages and session, default `badminton_state.json` |
+| `OPENAI_API_KEY` | Optional | API key for OpenAI-compatible endpoint (used first for AI summary) |
+| `OPENAI_BASE_URL` | Optional | Base URL for OpenAI-compatible endpoint, default `https://llm.mrdnd.dev/v1` |
+| `OPENAI_MODEL` | Optional | Model name for OpenAI-compatible endpoint, default `gpt-4o-mini` |
+| `GEMINI_API_KEY` | Optional | API key for Google Gemini (fallback if OpenAI key is blank) |
 
 ---
 
