@@ -663,3 +663,154 @@ func TestLeaderboard(t *testing.T) {
 		t.Errorf("expected sui.master as Chua sui, got %s", text)
 	}
 }
+
+func TestBillHistoryAndMultiSessionDistinction(t *testing.T) {
+	sender := &mockSender{}
+	mgr := NewManager(Config{
+		Enabled:   true,
+		ChannelID: "sport-chan",
+		RoleID:    "1840693979155271680",
+		RoleName:  "Vinh-CL",
+		StatePath: t.TempDir() + "/badminton.json",
+	}, sender)
+
+	// Match 1: 17/11/2026
+	mgr.state.MatchDate = "17/11/2026"
+	mgr.state.MatchDay = "Thứ Ba"
+	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", false, 2)
+	mgr.RecordReaction("sport-chan", "m1", "u2", "nam.nguyen", ":cong1:", false, 1)
+
+	bill1, _, err := mgr.CreateSplitBill("360k san 2 cau")
+	if err != nil {
+		t.Fatalf("CreateSplitBill 1 failed: %v", err)
+	}
+	mgr.SetCurrentBillMessageID("msg_bill_1")
+
+	if bill1.MatchDate != "17/11/2026" {
+		t.Fatalf("expected MatchDate 17/11/2026, got %s", bill1.MatchDate)
+	}
+
+	// Match 2: 19/11/2026
+	mgr.state.MatchDate = "19/11/2026"
+	mgr.state.MatchDay = "Thứ Năm"
+	mgr.state.GoingParticipants = make(map[string]Participant)
+	mgr.RecordReaction("sport-chan", "m2", "u1", "dai.trinhduc", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m2", "u2", "nam.nguyen", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m2", "u3", "viet.le", ":cong1:", false, 1)
+
+	bill2, err := mgr.CreateMoneyBill(45000)
+	if err != nil {
+		t.Fatalf("CreateMoneyBill 2 failed: %v", err)
+	}
+	mgr.SetCurrentBillMessageID("msg_bill_2")
+
+	if bill2.MatchDate != "19/11/2026" {
+		t.Fatalf("expected MatchDate 19/11/2026, got %s", bill2.MatchDate)
+	}
+
+	// Check BillHistory
+	if len(mgr.state.BillHistory) != 1 {
+		t.Fatalf("expected 1 archived bill in history, got %d", len(mgr.state.BillHistory))
+	}
+	if mgr.state.BillHistory[0].MessageID != "msg_bill_1" {
+		t.Errorf("expected archived bill message ID msg_bill_1, got %s", mgr.state.BillHistory[0].MessageID)
+	}
+
+	// Both message IDs should be recognized
+	if !mgr.IsCurrentBillMessage("msg_bill_1") {
+		t.Errorf("expected msg_bill_1 to be recognized as bill message")
+	}
+	if !mgr.IsCurrentBillMessage("msg_bill_2") {
+		t.Errorf("expected msg_bill_2 to be recognized as bill message")
+	}
+
+	// Test reaction payment specifically on bill 1
+	item1, targetBill1, ok := mgr.MarkPaidByUserIDOrNameOnBill("msg_bill_1", "u1", "dai.trinhduc")
+	if !ok || item1 == nil {
+		t.Fatalf("failed to mark u1 as paid on bill 1")
+	}
+	if targetBill1.MatchDate != "17/11/2026" {
+		t.Errorf("expected target bill to be 17/11/2026, got %s", targetBill1.MatchDate)
+	}
+
+	// Verify dai.trinhduc is paid on bill 1, but STILL UNPAID on bill 2
+	_, b1Paid, b1Unpaid, _, _, err := mgr.GetBillStatus("17/11")
+	if err != nil {
+		t.Fatalf("GetBillStatus(17/11) failed: %v", err)
+	}
+	if len(b1Paid) != 1 || b1Paid[0].Username != "dai.trinhduc" {
+		t.Errorf("expected dai.trinhduc paid on bill 1")
+	}
+	if len(b1Unpaid) != 1 || b1Unpaid[0].Username != "nam.nguyen" {
+		t.Errorf("expected nam.nguyen unpaid on bill 1")
+	}
+
+	// Bill 2 (current bill) status
+	_, b2Paid, b2Unpaid, _, _, err := mgr.GetBillStatus("19/11")
+	if err != nil {
+		t.Fatalf("GetBillStatus(19/11) failed: %v", err)
+	}
+	if len(b2Paid) != 0 {
+		t.Errorf("expected 0 paid on bill 2 so far, got %d", len(b2Paid))
+	}
+	if len(b2Unpaid) != 3 {
+		t.Errorf("expected 3 unpaid on bill 2, got %d", len(b2Unpaid))
+	}
+
+	// Test default GetBillStatus (without date filter) returns current bill (bill 2)
+	curBill, _, curUnpaid, _, _, err := mgr.GetBillStatus()
+	if err != nil {
+		t.Fatalf("GetBillStatus() failed: %v", err)
+	}
+	if curBill.MatchDate != "19/11/2026" {
+		t.Errorf("expected current bill 19/11/2026, got %s", curBill.MatchDate)
+	}
+	if len(curUnpaid) != 3 {
+		t.Errorf("expected 3 unpaid on current bill, got %d", len(curUnpaid))
+	}
+
+	// Test GetUnpaidList with date filter
+	_, unp1, totalUnp1, err := mgr.GetUnpaidList("17/11")
+	if err != nil {
+		t.Fatalf("GetUnpaidList(17/11) failed: %v", err)
+	}
+	if len(unp1) != 1 || unp1[0].Username != "nam.nguyen" {
+		t.Errorf("expected nam.nguyen unpaid on bill 1")
+	}
+	if totalUnp1 <= 0 {
+		t.Errorf("expected total unpaid > 0, got %d", totalUnp1)
+	}
+
+	// Test MarkPaidBatch on historical bill (17/11)
+	paidBatch, notFound, _, _, _, _, err := mgr.MarkPaidBatch([]string{"nam.nguyen"}, "17/11")
+	if err != nil {
+		t.Fatalf("MarkPaidBatch(17/11) failed: %v", err)
+	}
+	if len(notFound) > 0 || len(paidBatch) != 1 {
+		t.Errorf("expected nam.nguyen marked paid on bill 1")
+	}
+
+	// Now bill 1 should be completely paid
+	_, b1PaidAfter, b1UnpaidAfter, _, _, _ := mgr.GetBillStatus("17/11")
+	if len(b1PaidAfter) != 2 || len(b1UnpaidAfter) != 0 {
+		t.Errorf("expected bill 1 to have 2 paid and 0 unpaid")
+	}
+
+	// Mark unpaid on historical bill
+	unmarked, notFound2, err := mgr.MarkUnpaidBatch([]string{"nam.nguyen"}, "17/11")
+	if err != nil {
+		t.Fatalf("MarkUnpaidBatch(17/11) failed: %v", err)
+	}
+	if len(notFound2) > 0 || len(unmarked) != 1 {
+		t.Errorf("expected nam.nguyen marked unpaid on bill 1")
+	}
+
+	// Reaction removal on bill 1
+	unmarkedOnBill, _, err := mgr.MarkUnpaidOnBill("msg_bill_1", []string{"dai.trinhduc"})
+	if err != nil {
+		t.Fatalf("MarkUnpaidOnBill failed: %v", err)
+	}
+	if len(unmarkedOnBill) != 1 || unmarkedOnBill[0].Username != "dai.trinhduc" {
+		t.Errorf("expected dai.trinhduc marked unpaid via reaction removal")
+	}
+}

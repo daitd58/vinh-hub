@@ -110,6 +110,7 @@ type AttendanceState struct {
 	PreviousMatchDate          string                 `json:"previous_match_date,omitempty"`
 	CustomPaymentQR            string                 `json:"custom_payment_qr,omitempty"`
 	CurrentBill                *BillSession           `json:"current_bill,omitempty"`
+	BillHistory                []BillSession          `json:"bill_history,omitempty"`
 	MatchHistory               []MatchRecord          `json:"match_history,omitempty"`
 	LastBXH                    string                 `json:"last_bxh,omitempty"`
 }
@@ -207,6 +208,14 @@ func (m *Manager) loadState() {
 			if s.MatchHistory == nil {
 				s.MatchHistory = make([]MatchRecord, 0)
 			}
+			if s.BillHistory == nil {
+				s.BillHistory = make([]BillSession, 0)
+			}
+			for i := range s.BillHistory {
+				if s.BillHistory[i].Items == nil {
+					s.BillHistory[i].Items = make(map[string]*BillItem)
+				}
+			}
 			if s.CurrentBill != nil && s.CurrentBill.Items == nil {
 				s.CurrentBill.Items = make(map[string]*BillItem)
 			}
@@ -223,7 +232,8 @@ func (m *Manager) loadState() {
 			m.log.Info("loaded badminton attendance state",
 				"session", s.SessionID, "messages", len(s.Messages),
 				"reactions_going", len(s.ReactionsGoing), "reactions_not_going", len(s.ReactionsNotGoing),
-				"participants", len(s.GoingParticipants), "matches_history", len(s.MatchHistory))
+				"participants", len(s.GoingParticipants), "matches_history", len(s.MatchHistory),
+				"bills_history", len(s.BillHistory))
 			return
 		}
 	}
@@ -232,6 +242,7 @@ func (m *Manager) loadState() {
 		ReactionsGoing:    make(map[string]string),
 		ReactionsNotGoing: make(map[string]string),
 		GoingParticipants: make(map[string]Participant),
+		BillHistory:       make([]BillSession, 0),
 		MatchHistory:      make([]MatchRecord, 0),
 	}
 }
@@ -1427,6 +1438,8 @@ func (m *Manager) CreateSplitBill(expr string) (*BillSession, *SplitBreakdown, e
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.archivePreviousBillLocked()
+
 	items := make(map[string]*BillItem)
 	for _, p := range participants {
 		userAmount := int64(p.Slots) * slotPrice
@@ -1484,6 +1497,8 @@ func (m *Manager) CreateMoneyBill(unitAmount int) (*BillSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.archivePreviousBillLocked()
+
 	items := make(map[string]*BillItem)
 	for _, p := range participants {
 		userAmount := int64(p.Slots) * slotPrice
@@ -1512,6 +1527,50 @@ func (m *Manager) CreateMoneyBill(unitAmount int) (*BillSession, error) {
 	return bill, nil
 }
 
+func (m *Manager) archivePreviousBillLocked() {
+	if m.state.CurrentBill != nil && len(m.state.CurrentBill.Items) > 0 {
+		already := false
+		for i, old := range m.state.BillHistory {
+			if old.ID == m.state.CurrentBill.ID || (old.MessageID != "" && old.MessageID == m.state.CurrentBill.MessageID) {
+				m.state.BillHistory[i] = *m.state.CurrentBill
+				already = true
+				break
+			}
+		}
+		if !already {
+			m.state.BillHistory = append(m.state.BillHistory, *m.state.CurrentBill)
+		}
+	}
+}
+
+func (m *Manager) findBillLocked(filter string) *BillSession {
+	filter = strings.TrimSpace(filter)
+	if filter == "" {
+		return m.state.CurrentBill
+	}
+
+	cleanFilter := strings.ReplaceAll(filter, "/", "")
+	cleanFilter = strings.ReplaceAll(cleanFilter, "-", "")
+	cleanFilter = strings.ToLower(cleanFilter)
+
+	if m.state.CurrentBill != nil {
+		curDate := strings.ReplaceAll(m.state.CurrentBill.MatchDate, "/", "")
+		if strings.Contains(curDate, cleanFilter) || strings.Contains(strings.ToLower(m.state.CurrentBill.MatchDay), cleanFilter) {
+			return m.state.CurrentBill
+		}
+	}
+
+	for i := len(m.state.BillHistory) - 1; i >= 0; i-- {
+		b := &m.state.BillHistory[i]
+		bDate := strings.ReplaceAll(b.MatchDate, "/", "")
+		if strings.Contains(bDate, cleanFilter) || strings.Contains(strings.ToLower(b.MatchDay), cleanFilter) {
+			return b
+		}
+	}
+
+	return nil
+}
+
 // SetCurrentBillMessageID associates the sent Mezon message ID with the active bill.
 func (m *Manager) SetCurrentBillMessageID(msgID string) {
 	m.mu.Lock()
@@ -1522,54 +1581,85 @@ func (m *Manager) SetCurrentBillMessageID(msgID string) {
 	}
 }
 
-// IsCurrentBillMessage returns true if msgID matches the active bill's message ID.
+// IsCurrentBillMessage returns true if msgID matches any active or historical bill's message ID.
 func (m *Manager) IsCurrentBillMessage(msgID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.state.CurrentBill == nil || m.state.CurrentBill.MessageID == "" {
-		return false
+	if m.state.CurrentBill != nil && m.state.CurrentBill.MessageID == msgID {
+		return true
 	}
-	return m.state.CurrentBill.MessageID == msgID
+	for _, b := range m.state.BillHistory {
+		if b.MessageID == msgID {
+			return true
+		}
+	}
+	return false
 }
 
-// MarkPaidByUserIDOrName marks a user as paid by their user ID or username.
-func (m *Manager) MarkPaidByUserIDOrName(userID, username string) (*BillItem, bool) {
+// MarkPaidByUserIDOrNameOnBill marks a user as paid on a specific bill (identified by msgID) or current bill.
+func (m *Manager) MarkPaidByUserIDOrNameOnBill(msgID, userID, username string) (*BillItem, *BillSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
-		return nil, false
+	var targetBill *BillSession
+	if msgID != "" {
+		if m.state.CurrentBill != nil && m.state.CurrentBill.MessageID == msgID {
+			targetBill = m.state.CurrentBill
+		} else {
+			for i := range m.state.BillHistory {
+				if m.state.BillHistory[i].MessageID == msgID {
+					targetBill = &m.state.BillHistory[i]
+					break
+				}
+			}
+		}
+	}
+	if targetBill == nil {
+		targetBill = m.state.CurrentBill
+	}
+	if targetBill == nil || len(targetBill.Items) == 0 {
+		return nil, nil, false
 	}
 
-	if item, ok := m.state.CurrentBill.Items[userID]; ok {
-		now := time.Now().In(m.cfg.Timezone)
+	now := time.Now().In(m.cfg.Timezone)
+	if item, ok := targetBill.Items[userID]; ok {
 		item.Paid = true
 		item.PaidAt = &now
 		m.saveStateLocked()
-		return item, true
+		return item, targetBill, true
 	}
 
 	target := strings.ToLower(strings.TrimPrefix(username, "@"))
-	for _, item := range m.state.CurrentBill.Items {
+	for _, item := range targetBill.Items {
 		uLower := strings.ToLower(strings.TrimPrefix(item.Username, "@"))
 		if uLower == target || item.UserID == target {
-			now := time.Now().In(m.cfg.Timezone)
 			item.Paid = true
 			item.PaidAt = &now
 			m.saveStateLocked()
-			return item, true
+			return item, targetBill, true
 		}
 	}
 
-	return nil, false
+	return nil, nil, false
 }
 
-// MarkPaidBatch marks one or more members as paid.
-func (m *Manager) MarkPaidBatch(names []string) (paidItems []*BillItem, notFound []string, totalPaid int64, totalCost int64, paidCount int, totalCount int, err error) {
+// MarkPaidByUserIDOrName marks a user as paid by their user ID or username on the active bill.
+func (m *Manager) MarkPaidByUserIDOrName(userID, username string) (*BillItem, bool) {
+	item, _, ok := m.MarkPaidByUserIDOrNameOnBill("", userID, username)
+	return item, ok
+}
+
+// MarkPaidBatch marks one or more members as paid on the active bill or a specific date bill.
+func (m *Manager) MarkPaidBatch(names []string, filter ...string) (paidItems []*BillItem, notFound []string, totalPaid int64, totalCost int64, paidCount int, totalCount int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
+	f := ""
+	if len(filter) > 0 {
+		f = filter[0]
+	}
+	targetBill := m.findBillLocked(f)
+	if targetBill == nil || len(targetBill.Items) == 0 {
 		return nil, nil, 0, 0, 0, 0, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
 	}
 
@@ -1582,7 +1672,7 @@ func (m *Manager) MarkPaidBatch(names []string) (paidItems []*BillItem, notFound
 		}
 
 		var matched *BillItem
-		for _, item := range m.state.CurrentBill.Items {
+		for _, item := range targetBill.Items {
 			if strings.ToLower(strings.TrimPrefix(item.Username, "@")) == clean || item.UserID == clean {
 				matched = item
 				break
@@ -1598,7 +1688,7 @@ func (m *Manager) MarkPaidBatch(names []string) (paidItems []*BillItem, notFound
 		}
 	}
 
-	for _, item := range m.state.CurrentBill.Items {
+	for _, item := range targetBill.Items {
 		totalCost += item.Amount
 		totalCount++
 		if item.Paid {
@@ -1611,13 +1701,29 @@ func (m *Manager) MarkPaidBatch(names []string) (paidItems []*BillItem, notFound
 	return paidItems, notFound, totalPaid, totalCost, paidCount, totalCount, nil
 }
 
-// MarkUnpaidBatch marks one or more members as unpaid.
-func (m *Manager) MarkUnpaidBatch(names []string) (unmarked []*BillItem, notFound []string, err error) {
+// MarkUnpaidOnBill marks one or more members as unpaid on a specific bill (identified by msgID) or active bill.
+func (m *Manager) MarkUnpaidOnBill(msgID string, names []string) (unmarked []*BillItem, notFound []string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
-		return nil, nil, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
+	var targetBill *BillSession
+	if msgID != "" {
+		if m.state.CurrentBill != nil && m.state.CurrentBill.MessageID == msgID {
+			targetBill = m.state.CurrentBill
+		} else {
+			for i := range m.state.BillHistory {
+				if m.state.BillHistory[i].MessageID == msgID {
+					targetBill = &m.state.BillHistory[i]
+					break
+				}
+			}
+		}
+	}
+	if targetBill == nil {
+		targetBill = m.state.CurrentBill
+	}
+	if targetBill == nil || len(targetBill.Items) == 0 {
+		return nil, nil, fmt.Errorf("chưa có hoá đơn nào đang mở")
 	}
 
 	for _, raw := range names {
@@ -1628,7 +1734,7 @@ func (m *Manager) MarkUnpaidBatch(names []string) (unmarked []*BillItem, notFoun
 		}
 
 		var matched *BillItem
-		for _, item := range m.state.CurrentBill.Items {
+		for _, item := range targetBill.Items {
 			if strings.ToLower(strings.TrimPrefix(item.Username, "@")) == clean || item.UserID == clean {
 				matched = item
 				break
@@ -1648,16 +1754,68 @@ func (m *Manager) MarkUnpaidBatch(names []string) (unmarked []*BillItem, notFoun
 	return unmarked, notFound, nil
 }
 
-// GetBillStatus returns the active bill breakdown, paid list, and unpaid list.
-func (m *Manager) GetBillStatus() (bill *BillSession, paid []*BillItem, unpaid []*BillItem, totalPaid int64, totalCost int64, err error) {
+// MarkUnpaidBatch marks one or more members as unpaid on the active bill or filtered date bill.
+func (m *Manager) MarkUnpaidBatch(names []string, filter ...string) (unmarked []*BillItem, notFound []string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
+	f := ""
+	if len(filter) > 0 {
+		f = filter[0]
+	}
+	targetBill := m.findBillLocked(f)
+	if targetBill == nil || len(targetBill.Items) == 0 {
+		if f != "" {
+			return nil, nil, fmt.Errorf("không tìm thấy hoá đơn cho ngày: %s", f)
+		}
+		return nil, nil, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
+	}
+
+	for _, raw := range names {
+		clean := strings.ToLower(strings.TrimPrefix(raw, "@"))
+		clean = strings.TrimSpace(clean)
+		if clean == "" {
+			continue
+		}
+
+		var matched *BillItem
+		for _, item := range targetBill.Items {
+			if strings.ToLower(strings.TrimPrefix(item.Username, "@")) == clean || item.UserID == clean {
+				matched = item
+				break
+			}
+		}
+
+		if matched != nil {
+			matched.Paid = false
+			matched.PaidAt = nil
+			unmarked = append(unmarked, matched)
+		} else {
+			notFound = append(notFound, raw)
+		}
+	}
+
+	m.saveStateLocked()
+	return unmarked, notFound, nil
+}
+
+// GetBillStatus returns the bill breakdown, paid list, and unpaid list (optionally filtered by date).
+func (m *Manager) GetBillStatus(filter ...string) (bill *BillSession, paid []*BillItem, unpaid []*BillItem, totalPaid int64, totalCost int64, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	f := ""
+	if len(filter) > 0 {
+		f = filter[0]
+	}
+	bill = m.findBillLocked(f)
+	if bill == nil || len(bill.Items) == 0 {
+		if f != "" {
+			return nil, nil, nil, 0, 0, fmt.Errorf("không tìm thấy hoá đơn cho ngày: %s", f)
+		}
 		return nil, nil, nil, 0, 0, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
 	}
 
-	bill = m.state.CurrentBill
 	for _, item := range bill.Items {
 		totalCost += item.Amount
 		if item.Paid {
@@ -1678,16 +1836,23 @@ func (m *Manager) GetBillStatus() (bill *BillSession, paid []*BillItem, unpaid [
 	return bill, paid, unpaid, totalPaid, totalCost, nil
 }
 
-// GetUnpaidList returns all participants who have not paid yet.
-func (m *Manager) GetUnpaidList() (bill *BillSession, unpaid []*BillItem, totalUnpaid int64, err error) {
+// GetUnpaidList returns participants who have not paid yet (optionally filtered by date).
+func (m *Manager) GetUnpaidList(filter ...string) (bill *BillSession, unpaid []*BillItem, totalUnpaid int64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
+	f := ""
+	if len(filter) > 0 {
+		f = filter[0]
+	}
+	bill = m.findBillLocked(f)
+	if bill == nil || len(bill.Items) == 0 {
+		if f != "" {
+			return nil, nil, 0, fmt.Errorf("không tìm thấy hoá đơn cho ngày: %s", f)
+		}
 		return nil, nil, 0, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
 	}
 
-	bill = m.state.CurrentBill
 	for _, item := range bill.Items {
 		if !item.Paid {
 			totalUnpaid += item.Amount

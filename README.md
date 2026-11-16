@@ -193,13 +193,20 @@ When the bot is running in your channel or thread:
 - `*summary`: Xem nhanh tình hình điểm danh hiện tại mà không cần đợi cron.
 - `*split <công_thức>`: Chia tiền sân + cầu linh hoạt (ví dụ: `*split 360k + 26*3`, `*split 360k + 26k*4`, `*split 360k san 45k cau`, `*split 450k`). Tự động tính tổng tiền, chia đều theo slot buổi đánh hôm trước, làm tròn lên 1.000đ, tag người tham gia và gửi mã QR thanh toán.
 - `*money <số_tiền>`: Chia tiền theo đơn giá slot cố định (ví dụ: `*money 45k`).
-- `*paid [@user...]`:
-  - `*paid @user1 @user2`: Đánh dấu thành viên đã thanh toán.
-  - `*paid` (không tham số): Hiển thị dashboard tiến độ thu tiền (ai đã đóng, ai chưa đóng, tổng đã thu / còn thiếu).
-  - *Mẹo*: Thành viên có thể react `:checked:`, `:check:` (custom emoji trong clan KOMU) hoặc `✅`, `💵`, `👍` trực tiếp vào tin nhắn chia tiền để bot tự động ghi nhận đã đóng tiền! Bot cũng tự động thả sẵn reaction `:checked:` để mọi người bấm 1 chạm.
-- `*unpaid [@user...]`:
+- `*paid [ngày] [@user...]`:
+  - `*paid`: Hiển thị dashboard tiến độ thu tiền buổi gần nhất (ai đã đóng, ai chưa đóng, tổng đã thu / còn thiếu).
+  - `*paid 17/11` (hoặc `*paid 1711`): Xem dashboard tiến độ thu tiền của buổi ngày 17/11 trong lịch sử.
+  - `*paid @user1 @user2`: Đánh dấu thành viên đã thanh toán buổi hiện tại.
+  - `*paid 17/11 @user1`: Đánh dấu thành viên đã thanh toán cho buổi ngày 17/11.
+  - *Mẹo*: Thành viên có thể react `:checked:`, `:check:` (custom emoji trong clan KOMU) hoặc `✅`, `💵`, `👍` trực tiếp vào tin nhắn chia tiền để bot tự động ghi nhận đã đóng tiền cho đúng buổi đó! Bot cũng tự động thả sẵn reaction `:checked:` để mọi người bấm 1 chạm.
+- `*unpaid [ngày] [@user...]`:
+  - `*unpaid`: Lọc danh sách những người chưa đóng tiền buổi gần nhất, tag trực tiếp để nhắc nhở và đính kèm mã QR thanh toán + cú pháp chuyển khoản.
+  - `*unpaid 17/11`: Lọc danh sách và nhắc nhở những người chưa đóng tiền của buổi ngày 17/11.
   - `*unpaid @user1`: Chuyển trạng thái về chưa thanh toán (nếu lỡ mark nhầm).
-  - `*unpaid` (không tham số): Lọc danh sách những người chưa đóng tiền, tag trực tiếp để nhắc nhở và đính kèm mã QR thanh toán.
+  - `*unpaid 17/11 @user1`: Chuyển trạng thái về chưa thanh toán của buổi 17/11.
+- **Phân biệt thanh toán giữa các buổi**:
+  - *Qua chuyển khoản ngân hàng*: Bot tự động tạo và hướng dẫn cú pháp chuyển khoản chuẩn trong mọi hoá đơn và tin nhắn nhắc nhở: `CL <DDMM> <tên>` (Ví dụ: `CL 1711 dai.trinhduc`). Thủ quỹ chỉ cần nhìn nội dung sao kê là biết ngay thanh toán cho buổi nào và của ai.
+  - *Qua tin nhắn Mezon*: Mỗi hoá đơn được lưu kèm `MessageID` riêng biệt (`BillHistory`). Thành viên thả reaction `:checked:` vào tin nhắn chia tiền của buổi nào thì bot sẽ ghi nhận chính xác cho buổi đó, không bao giờ bị ghi đè hay nhầm lẫn.
 - `*bxh [tháng]` (hoặc `*stats`): Xem bảng xếp hạng tháng (ví dụ: `*bxh`, `*bxh 11/2026`). Thống kê tổng số buổi, Top "Chăm chỉ" trao danh hiệu `👑 Chiến thần quật cầu`, và Top "Chúa sủi" trao danh hiệu `🍗 Chúa sủi của tháng`. Bot cũng tự động cron chạy vào 20:00 ngày cuối tháng để thông báo vào kênh.
 - `*money qr <link_qr>` (hoặc `*register qr <link_qr>`): Cập nhật mã QR thanh toán mới.
 - `*help`: Hiển thị bảng hướng dẫn lệnh.

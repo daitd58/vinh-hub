@@ -389,11 +389,11 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 			cleanEmoji == "7237751213104827794" || cleanEmoji == "7232028638063261029"
 		if isPaidEmoji {
 			if !ev.Action {
-				if item, ok := sportMgr.MarkPaidByUserIDOrName(senderID, senderName); ok {
-					b.logger().Info("marked user as paid via reaction", "user", item.Username, "emoji", emojiVal, "msg_id", msgID)
+				if item, bill, ok := sportMgr.MarkPaidByUserIDOrNameOnBill(msgID, senderID, senderName); ok {
+					b.logger().Info("marked user as paid via reaction", "user", item.Username, "emoji", emojiVal, "bill_date", bill.MatchDate, "msg_id", msgID)
 				}
 			} else {
-				if _, _, err := sportMgr.MarkUnpaidBatch([]string{senderName}); err == nil {
+				if _, _, err := sportMgr.MarkUnpaidOnBill(msgID, []string{senderName}); err == nil {
 					b.logger().Info("unmarked user paid via reaction removal", "user", senderName, "emoji", emojiVal, "msg_id", msgID)
 				}
 			}
@@ -770,7 +770,18 @@ func (b *Bot) handleSplitCommand(m *mezon.ChannelMessage, rawText string) {
 		})
 	}
 
-	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React :checked: hoặc :check: vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
+	dateDDMM := ""
+	dateParts := strings.Split(bill.MatchDate, "/")
+	if len(dateParts) >= 2 {
+		dateDDMM = dateParts[0] + dateParts[1]
+	}
+	syntaxExample := "CL " + dateDDMM + " <tên>"
+	if dateDDMM == "" {
+		syntaxExample = "CL <tên>"
+	}
+
+	sb.WriteString(fmt.Sprintf("\n📝 **Nội dung chuyển khoản:** `%s` (Ví dụ: `CL %s dai.trinhduc`)\n", syntaxExample, dateDDMM))
+	sb.WriteString("👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React :checked: hoặc :check: vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
 
 	qrURL := sportMgr.GetPaymentQR()
 	signedQRURL := qrURL
@@ -875,7 +886,18 @@ func (b *Bot) handleMoneyCommand(m *mezon.ChannelMessage, rawText string) {
 		})
 	}
 
-	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React :checked: hoặc :check: vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
+	dateDDMM := ""
+	dateParts := strings.Split(bill.MatchDate, "/")
+	if len(dateParts) >= 2 {
+		dateDDMM = dateParts[0] + dateParts[1]
+	}
+	syntaxExample := "CL " + dateDDMM + " <tên>"
+	if dateDDMM == "" {
+		syntaxExample = "CL <tên>"
+	}
+
+	sb.WriteString(fmt.Sprintf("\n📝 **Nội dung chuyển khoản:** `%s` (Ví dụ: `CL %s dai.trinhduc`)\n", syntaxExample, dateDDMM))
+	sb.WriteString("👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React :checked: hoặc :check: vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
 
 	qrURL := sportMgr.GetPaymentQR()
 	signedQRURL := qrURL
@@ -913,50 +935,20 @@ func (b *Bot) handleMoneyCommand(m *mezon.ChannelMessage, rawText string) {
 	}
 }
 
-func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
-	b.mu.RLock()
-	sportMgr := b.sportMgr
-	b.mu.RUnlock()
-
-	if sportMgr == nil {
-		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
-		return
+func isDateArg(s string) bool {
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "/") || strings.Contains(s, "-") {
+		return true
 	}
-
-	parts := strings.Fields(rawText)
-	args := parts[1:]
-
-	if len(args) > 0 {
-		paid, notFound, totalPaid, totalCost, paidCount, totalCount, err := sportMgr.MarkPaidBatch(args)
-		if err != nil {
-			_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
-			return
+	if len(s) == 4 {
+		if _, err := strconv.Atoi(s); err == nil {
+			return true
 		}
-
-		var sb strings.Builder
-		if len(paid) > 0 {
-			var names []string
-			for _, p := range paid {
-				names = append(names, "@"+p.Username)
-			}
-			sb.WriteString(fmt.Sprintf("✅ **Đã ghi nhận đóng tiền:** %s 💵\n\n", strings.Join(names, ", ")))
-		}
-		if len(notFound) > 0 {
-			sb.WriteString(fmt.Sprintf("⚠️ *Không tìm thấy trong hoá đơn:* %s\n\n", strings.Join(notFound, ", ")))
-		}
-		sb.WriteString(fmt.Sprintf("📊 **Tiến độ thu tiền:** %d/%d người (%s / %s VNĐ)",
-			paidCount, totalCount, fund.FormatVND(totalPaid), fund.FormatVND(totalCost)))
-		_ = b.reply(m, sb.String())
-		return
 	}
+	return false
+}
 
-	// No args -> Show payment dashboard
-	bill, paid, unpaid, totalPaid, totalCost, err := sportMgr.GetBillStatus()
-	if err != nil {
-		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
-		return
-	}
-
+func formatBillDashboard(bill *sport.BillSession, paid []*sport.BillItem, unpaid []*sport.BillItem, totalPaid, totalCost int64) string {
 	var sb strings.Builder
 	sb.WriteString("📋 **TIẾN ĐỘ THU TIỀN CẦU LÔNG**\n")
 	if bill.MatchDay != "" && bill.MatchDate != "" {
@@ -991,7 +983,60 @@ func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
 		sb.WriteString("🎉 *Toàn bộ thành viên đã hoàn tất đóng tiền! Cảm ơn cả nhà!* 🏸❤️")
 	}
 
-	_ = b.reply(m, sb.String())
+	return sb.String()
+}
+
+func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+
+	parts := strings.Fields(rawText)
+	args := parts[1:]
+
+	dateFilter := ""
+	if len(args) > 0 && isDateArg(args[0]) {
+		dateFilter = args[0]
+		args = args[1:]
+	}
+
+	if len(args) > 0 {
+		paid, notFound, totalPaid, totalCost, paidCount, totalCount, err := sportMgr.MarkPaidBatch(args, dateFilter)
+		if err != nil {
+			_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+			return
+		}
+
+		var sb strings.Builder
+		if len(paid) > 0 {
+			var names []string
+			for _, p := range paid {
+				names = append(names, "@"+p.Username)
+			}
+			sb.WriteString(fmt.Sprintf("✅ **Đã ghi nhận đóng tiền:** %s 💵\n\n", strings.Join(names, ", ")))
+		}
+		if len(notFound) > 0 {
+			sb.WriteString(fmt.Sprintf("⚠️ *Không tìm thấy trong hoá đơn:* %s\n\n", strings.Join(notFound, ", ")))
+		}
+		sb.WriteString(fmt.Sprintf("📊 **Tiến độ thu tiền:** %d/%d người (%s / %s VNĐ)",
+			paidCount, totalCount, fund.FormatVND(totalPaid), fund.FormatVND(totalCost)))
+		_ = b.reply(m, sb.String())
+		return
+	}
+
+	// No args or date-only arg -> Show payment dashboard
+	bill, paid, unpaid, totalPaid, totalCost, err := sportMgr.GetBillStatus(dateFilter)
+	if err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+		return
+	}
+
+	_ = b.reply(m, formatBillDashboard(bill, paid, unpaid, totalPaid, totalCost))
 }
 
 func (b *Bot) handleUnpaidCommand(m *mezon.ChannelMessage, rawText string) {
@@ -1007,8 +1052,14 @@ func (b *Bot) handleUnpaidCommand(m *mezon.ChannelMessage, rawText string) {
 	parts := strings.Fields(rawText)
 	args := parts[1:]
 
+	dateFilter := ""
+	if len(args) > 0 && isDateArg(args[0]) {
+		dateFilter = args[0]
+		args = args[1:]
+	}
+
 	if len(args) > 0 {
-		unmarked, notFound, err := sportMgr.MarkUnpaidBatch(args)
+		unmarked, notFound, err := sportMgr.MarkUnpaidBatch(args, dateFilter)
 		if err != nil {
 			_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
 			return
@@ -1029,8 +1080,8 @@ func (b *Bot) handleUnpaidCommand(m *mezon.ChannelMessage, rawText string) {
 		return
 	}
 
-	// No args -> Remind unpaid participants with QR code & mentions
-	bill, unpaid, totalUnpaid, err := sportMgr.GetUnpaidList()
+	// No args or date-only arg -> Remind unpaid participants with QR code & mentions
+	bill, unpaid, totalUnpaid, err := sportMgr.GetUnpaidList(dateFilter)
 	if err != nil {
 		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
 		return
@@ -1060,6 +1111,18 @@ func (b *Bot) handleUnpaidCommand(m *mezon.ChannelMessage, rawText string) {
 	}
 
 	sb.WriteString(fmt.Sprintf("\n💰 Tổng còn thiếu: **%s VNĐ**\n", fund.FormatVND(totalUnpaid)))
+
+	dateDDMM := ""
+	dateParts := strings.Split(bill.MatchDate, "/")
+	if len(dateParts) >= 2 {
+		dateDDMM = dateParts[0] + dateParts[1]
+	}
+	syntaxExample := "CL " + dateDDMM + " <tên>"
+	if dateDDMM == "" {
+		syntaxExample = "CL <tên>"
+	}
+
+	sb.WriteString(fmt.Sprintf("📝 **Nội dung chuyển khoản:** `%s` (Ví dụ: `CL %s dai.trinhduc`)\n", syntaxExample, dateDDMM))
 	sb.WriteString("👉 Mọi người vui lòng quét mã QR bên dưới để thanh toán sớm nhé! 🔥")
 
 	qrURL := sportMgr.GetPaymentQR()
