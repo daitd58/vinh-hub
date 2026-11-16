@@ -28,19 +28,31 @@ type MessageRecord struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// Participant represents a confirmed match participant with their slots count.
+type Participant struct {
+	UserID   string `json:"user_id"`
+	Username string `json:"username"`
+	Slots    int    `json:"slots"`
+}
+
 // AttendanceState persists the current check-in session and recent messages.
 type AttendanceState struct {
-	SessionID         string            `json:"session_id"`          // e.g. "match-2026-11-17"
-	CallTime          time.Time         `json:"call_time"`           // when check-in was triggered
-	DiemDanhMessageID string            `json:"diemdanh_message_id"` // message ID of the attendance call
-	MatchDay          string            `json:"match_day"`           // e.g. "Thứ Ba"
-	MatchDate         string            `json:"match_date"`          // e.g. "17/11/2026"
-	MatchTime         string            `json:"match_time"`          // e.g. "18:00"
-	LastDiemDanh      string            `json:"last_diemdanh"`       // e.g. "2026-11-16_09"
-	LastReminder      string            `json:"last_reminder"`       // e.g. "2026-11-17_17"
-	Messages          []MessageRecord   `json:"messages"`
-	ReactionsGoing    map[string]string `json:"reactions_going"`     // userID -> username (:cong1:)
-	ReactionsNotGoing map[string]string `json:"reactions_not_going"` // userID -> username (:tru1:)
+	SessionID                  string                 `json:"session_id"`          // e.g. "match-2026-11-17"
+	CallTime                   time.Time              `json:"call_time"`           // when check-in was triggered
+	DiemDanhMessageID          string                 `json:"diemdanh_message_id"` // message ID of the attendance call
+	MatchDay                   string                 `json:"match_day"`           // e.g. "Thứ Ba"
+	MatchDate                  string                 `json:"match_date"`          // e.g. "17/11/2026"
+	MatchTime                  string                 `json:"match_time"`          // e.g. "18:00"
+	LastDiemDanh               string                 `json:"last_diemdanh"`       // e.g. "2026-11-16_09"
+	LastReminder               string                 `json:"last_reminder"`       // e.g. "2026-11-17_17"
+	Messages                   []MessageRecord        `json:"messages"`
+	ReactionsGoing             map[string]string      `json:"reactions_going"`     // userID -> username (:cong1:)
+	ReactionsNotGoing          map[string]string      `json:"reactions_not_going"` // userID -> username (:tru1:)
+	GoingParticipants          map[string]Participant `json:"going_participants,omitempty"`
+	PreviousMatchParticipants []Participant          `json:"previous_match_participants,omitempty"`
+	PreviousMatchDay           string                 `json:"previous_match_day,omitempty"`
+	PreviousMatchDate          string                 `json:"previous_match_date,omitempty"`
+	CustomPaymentQR            string                 `json:"custom_payment_qr,omitempty"`
 }
 
 // SummaryResult contains the parsed attendance details.
@@ -64,6 +76,7 @@ type Config struct {
 	OpenAIBaseURL string
 	OpenAIModel   string
 	GeminiKey     string
+	PaymentQR     string
 	Timezone      *time.Location
 	Log           *slog.Logger
 }
@@ -129,10 +142,23 @@ func (m *Manager) loadState() {
 			if s.ReactionsNotGoing == nil {
 				s.ReactionsNotGoing = make(map[string]string)
 			}
+			if s.GoingParticipants == nil {
+				s.GoingParticipants = make(map[string]Participant)
+			}
+			for uid, uname := range s.ReactionsGoing {
+				if _, ok := s.GoingParticipants[uid]; !ok {
+					s.GoingParticipants[uid] = Participant{
+						UserID:   uid,
+						Username: uname,
+						Slots:    1,
+					}
+				}
+			}
 			m.state = s
 			m.log.Info("loaded badminton attendance state",
 				"session", s.SessionID, "messages", len(s.Messages),
-				"reactions_going", len(s.ReactionsGoing), "reactions_not_going", len(s.ReactionsNotGoing))
+				"reactions_going", len(s.ReactionsGoing), "reactions_not_going", len(s.ReactionsNotGoing),
+				"participants", len(s.GoingParticipants))
 			return
 		}
 	}
@@ -140,6 +166,7 @@ func (m *Manager) loadState() {
 		Messages:          make([]MessageRecord, 0),
 		ReactionsGoing:    make(map[string]string),
 		ReactionsNotGoing: make(map[string]string),
+		GoingParticipants: make(map[string]Participant),
 	}
 }
 
@@ -151,7 +178,7 @@ func (m *Manager) saveStateLocked() {
 }
 
 // RecordReaction registers a member reaction (:cong1: or :tru1:) to the attendance post.
-func (m *Manager) RecordReaction(channelID, messageID, userID, username, emoji string, isRemove bool) {
+func (m *Manager) RecordReaction(channelID, messageID, userID, username, emoji string, isRemove bool, count int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -173,15 +200,24 @@ func (m *Manager) RecordReaction(channelID, messageID, userID, username, emoji s
 	if m.state.ReactionsNotGoing == nil {
 		m.state.ReactionsNotGoing = make(map[string]string)
 	}
+	if m.state.GoingParticipants == nil {
+		m.state.GoingParticipants = make(map[string]Participant)
+	}
 
 	name := username
 	if name == "" {
 		name = userID
 	}
 
+	slots := count
+	if slots <= 0 {
+		slots = 1
+	}
+
 	if isRemove {
 		if isGoing {
 			delete(m.state.ReactionsGoing, userID)
+			delete(m.state.GoingParticipants, userID)
 		}
 		if isNotGoing {
 			delete(m.state.ReactionsNotGoing, userID)
@@ -189,15 +225,21 @@ func (m *Manager) RecordReaction(channelID, messageID, userID, username, emoji s
 	} else {
 		if isGoing {
 			m.state.ReactionsGoing[userID] = name
+			m.state.GoingParticipants[userID] = Participant{
+				UserID:   userID,
+				Username: name,
+				Slots:    slots,
+			}
 			delete(m.state.ReactionsNotGoing, userID)
 		} else if isNotGoing {
 			m.state.ReactionsNotGoing[userID] = name
 			delete(m.state.ReactionsGoing, userID)
+			delete(m.state.GoingParticipants, userID)
 		}
 	}
 
 	m.saveStateLocked()
-	m.log.Info("recorded sport reaction", "user", name, "emoji", emoji, "is_remove", isRemove,
+	m.log.Info("recorded sport reaction", "user", name, "emoji", emoji, "is_remove", isRemove, "slots", slots,
 		"going_count", len(m.state.ReactionsGoing), "not_going_count", len(m.state.ReactionsNotGoing))
 }
 
@@ -425,16 +467,36 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 	matchDay, matchDate, matchTime := NextMatchInfo(now)
 
 	m.mu.Lock()
+	// Archive previous match session participants before starting fresh attendance
+	var prev []Participant
+	for _, p := range m.state.GoingParticipants {
+		prev = append(prev, p)
+	}
+	if len(prev) == 0 {
+		for uid, name := range m.state.ReactionsGoing {
+			prev = append(prev, Participant{UserID: uid, Username: name, Slots: 1})
+		}
+	}
+	if len(prev) > 0 {
+		sort.Slice(prev, func(i, j int) bool {
+			return prev[i].Username < prev[j].Username
+		})
+		m.state.PreviousMatchParticipants = prev
+		m.state.PreviousMatchDate = m.state.MatchDate
+		m.state.PreviousMatchDay = m.state.MatchDay
+	}
+
 	m.state.SessionID = fmt.Sprintf("match-%s", matchDate)
 	m.state.CallTime = now
 	m.state.MatchDay = matchDay
 	m.state.MatchDate = matchDate
 	m.state.MatchTime = matchTime
 	m.state.DiemDanhMessageID = ""
-	// Clear previous session messages and reactions to start fresh attendance collection
+	// Clear current session messages and reactions to start fresh attendance collection
 	m.state.Messages = make([]MessageRecord, 0)
 	m.state.ReactionsGoing = make(map[string]string)
 	m.state.ReactionsNotGoing = make(map[string]string)
+	m.state.GoingParticipants = make(map[string]Participant)
 	m.saveStateLocked()
 	m.mu.Unlock()
 
@@ -922,4 +984,128 @@ func (m *Manager) GetSummary(ctx context.Context) string {
 	}
 
 	return sb.String()
+}
+
+// GetPaymentQR returns the active payment QR image URL.
+func (m *Manager) GetPaymentQR() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state.CustomPaymentQR != "" {
+		return m.state.CustomPaymentQR
+	}
+	return m.cfg.PaymentQR
+}
+
+// SetPaymentQR updates the custom payment QR code URL.
+func (m *Manager) SetPaymentQR(url string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.CustomPaymentQR = strings.TrimSpace(url)
+	m.saveStateLocked()
+}
+
+var reTwoSlots = regexp.MustCompile(`(?i)(\+2|2\s*slot|2\s*vé|2\s*ve|2\s*người|2\s*nguoi)`)
+
+// GetParticipantsForMoney returns the target match day, date, and participants list for bill splitting.
+func (m *Manager) GetParticipantsForMoney() (matchDay string, matchDate string, participants []Participant) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if current session match date is in the future, and we have archived previous match participants
+	now := time.Now().In(m.cfg.Timezone)
+	currentMatchInFuture := false
+	if m.state.MatchDate != "" {
+		if t, err := time.ParseInLocation("02/01/2006", m.state.MatchDate, m.cfg.Timezone); err == nil {
+			today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, m.cfg.Timezone)
+			if t.After(today) {
+				currentMatchInFuture = true
+			}
+		}
+	}
+
+	// If current session is for a future match and previous match has participants, use previous match
+	if currentMatchInFuture && len(m.state.PreviousMatchParticipants) > 0 {
+		return m.state.PreviousMatchDay, m.state.PreviousMatchDate, m.state.PreviousMatchParticipants
+	}
+
+	// Otherwise, build from current session
+	var current []Participant
+	for _, p := range m.state.GoingParticipants {
+		current = append(current, p)
+	}
+	if len(current) == 0 {
+		for uid, name := range m.state.ReactionsGoing {
+			current = append(current, Participant{UserID: uid, Username: name, Slots: 1})
+		}
+	}
+
+	// Check recent chat messages in current session for slot upgrades
+	current = m.enrichParticipantsWithMessagesLocked(current)
+
+	if len(current) > 0 {
+		sort.Slice(current, func(i, j int) bool {
+			return current[i].Username < current[j].Username
+		})
+		return m.state.MatchDay, m.state.MatchDate, current
+	}
+
+	// Fallback to previous match if current session is empty
+	if len(m.state.PreviousMatchParticipants) > 0 {
+		return m.state.PreviousMatchDay, m.state.PreviousMatchDate, m.state.PreviousMatchParticipants
+	}
+
+	return m.state.MatchDay, m.state.MatchDate, nil
+}
+
+func (m *Manager) enrichParticipantsWithMessagesLocked(participants []Participant) []Participant {
+	userMap := make(map[string]int)
+	for i, p := range participants {
+		userMap[strings.ToLower(p.Username)] = i
+	}
+
+	for _, msg := range m.state.Messages {
+		uLower := strings.ToLower(msg.Username)
+		idx, exists := userMap[uLower]
+		if exists {
+			if reTwoSlots.MatchString(msg.Content) && participants[idx].Slots < 2 {
+				participants[idx].Slots = 2
+			}
+		}
+	}
+	return participants
+}
+
+// ParseMoneyAmount parses strings like "45k", "45K", "45000", "45.000", "45" into integer VND amount.
+func ParseMoneyAmount(raw string) (int, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, fmt.Errorf("vui lòng nhập số tiền, ví dụ: *money 45k")
+	}
+	s = strings.ToLower(s)
+	s = strings.TrimSuffix(s, "vnd")
+	s = strings.TrimSuffix(s, "vnđ")
+	s = strings.TrimSuffix(s, "đ")
+	s = strings.TrimSuffix(s, "d")
+	s = strings.TrimSpace(s)
+
+	hasK := false
+	if strings.HasSuffix(s, "k") {
+		hasK = true
+		s = strings.TrimSuffix(s, "k")
+	}
+
+	s = strings.ReplaceAll(s, ".", "")
+	s = strings.ReplaceAll(s, ",", "")
+	s = strings.TrimSpace(s)
+
+	val, err := strconv.Atoi(s)
+	if err != nil || val <= 0 {
+		return 0, fmt.Errorf("số tiền không hợp lệ: %q", raw)
+	}
+
+	if hasK || val < 1000 {
+		val *= 1000
+	}
+
+	return val, nil
 }

@@ -191,6 +191,8 @@ When the bot is running in your channel or thread:
 - `*diemdanh` (hoặc `*vinhhub diemdanh`): Kích hoạt ngay thông báo điểm danh cho buổi đánh tiếp theo (ping role `@Vinh-CL`).
 - `*nhaclich`: Gửi ngay tin nhắn nhắc lịch kèm AI tóm tắt danh sách tham gia, vắng mặt, và sân bãi.
 - `*summary`: Xem nhanh tình hình điểm danh hiện tại mà không cần đợi cron.
+- `*money <số_tiền>`: Chia tiền buổi đánh hôm trước, tag danh sách người tham gia, tính số tiền theo số slot (ví dụ react `:cong1:` 2 lần = 2 slot = 90k) và gửi kèm mã QR thanh toán (ví dụ: `*money 45k`).
+- `*money qr <link_qr>` (hoặc `*register qr <link_qr>`): Cập nhật mã QR thanh toán mới.
 - `*help`: Hiển thị bảng hướng dẫn lệnh.
 
 ---

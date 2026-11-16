@@ -368,7 +368,7 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 		}
 	}
 
-	sportMgr.RecordReaction(chanID, msgID, senderID, senderName, emojiVal, ev.Action)
+	sportMgr.RecordReaction(chanID, msgID, senderID, senderName, emojiVal, ev.Action, int(ev.Count))
 }
 
 // SendToThread sends a message to a thread or fallback channel.
@@ -503,6 +503,11 @@ func (b *Bot) handleMessage(m *mezon.ChannelMessage) {
 		b.handleNhacLichCommand(m)
 	case cmd == "*summary" || cmd == "*vinhhub summary":
 		b.handleSummaryCommand(m)
+	case strings.HasPrefix(cmd, "*money") || strings.HasPrefix(cmd, "!money") || strings.HasPrefix(cmd, "/money") ||
+		strings.HasPrefix(cmd, "*chiatien") || strings.HasPrefix(cmd, "!chiatien") || strings.HasPrefix(cmd, "/chiatien"):
+		b.handleMoneyCommand(m, text)
+	case strings.HasPrefix(cmd, "*register qr") || strings.HasPrefix(cmd, "!register qr") || strings.HasPrefix(cmd, "/register qr"):
+		b.handleRegisterQRCommand(m, text)
 	}
 }
 
@@ -656,6 +661,126 @@ func (b *Bot) handleFundCommand(m *mezon.ChannelMessage) {
 	_ = b.reply(m, report)
 }
 
+func (b *Bot) handleMoneyCommand(m *mezon.ChannelMessage, rawText string) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+
+	parts := strings.Fields(rawText)
+	if len(parts) >= 3 && strings.ToLower(parts[1]) == "qr" {
+		newQR := parts[2]
+		sportMgr.SetPaymentQR(newQR)
+		_ = b.reply(m, fmt.Sprintf("✅ Đã cập nhật mã QR thanh toán thành công!\nLink: %s", newQR))
+		return
+	}
+
+	if len(parts) < 2 {
+		_ = b.reply(m, "⚠️ Vui lòng nhập số tiền cần chia, ví dụ: `*money 45k` hoặc `*money 45000`")
+		return
+	}
+
+	unitAmount, err := sport.ParseMoneyAmount(parts[1])
+	if err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+		return
+	}
+
+	matchDay, matchDate, participants := sportMgr.GetParticipantsForMoney()
+	if len(participants) == 0 {
+		_ = b.reply(m, "⚠️ Chưa có danh sách người tham gia buổi đánh hôm trước để chia tiền.")
+		return
+	}
+
+	totalSlots := 0
+	for _, p := range participants {
+		totalSlots += p.Slots
+	}
+	totalAmount := totalSlots * unitAmount
+
+	title := "🏸 **[CHIA TIỀN CẦU LÔNG"
+	if matchDay != "" && matchDate != "" {
+		title += fmt.Sprintf(" - %s (%s)", strings.ToUpper(matchDay), matchDate)
+	}
+	title += "]**"
+
+	var sb strings.Builder
+	sb.WriteString(title + "\n\n")
+	sb.WriteString(fmt.Sprintf("📊 Tổng kết buổi đánh hôm trước: **%d người** (**%d slot**)\n", len(participants), totalSlots))
+	sb.WriteString(fmt.Sprintf("💵 Số tiền mỗi slot: **%s VNĐ**\n", fund.FormatVND(int64(unitAmount))))
+	sb.WriteString(fmt.Sprintf("💰 Tổng cộng: **%s VNĐ**\n\n", fund.FormatVND(int64(totalAmount))))
+	sb.WriteString("📋 **Danh sách thanh toán:**\n")
+
+	var mentions []mezon.Mention
+	for _, p := range participants {
+		userAmount := p.Slots * unitAmount
+		slotText := fmt.Sprintf("%d slot", p.Slots)
+		tag := "@" + p.Username
+		sb.WriteString(fmt.Sprintf("• %s (%s): **%s VNĐ**\n", tag, slotText, fund.FormatVND(int64(userAmount))))
+
+		mentions = append(mentions, mezon.Mention{
+			UserID:   p.UserID,
+			Username: p.Username,
+		})
+	}
+
+	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé! Cảm ơn cả nhà! 🏸🔥")
+
+	qrURL := sportMgr.GetPaymentQR()
+	signedQRURL := qrURL
+	if b.client != nil {
+		if s, err := vinhhub.SignCDNURL(b.client, qrURL); err == nil && s != "" {
+			signedQRURL = s
+		}
+	}
+
+	opts := &mezon.SendOptions{
+		Mentions: mentions,
+	}
+
+	if signedQRURL != "" {
+		opts.Attachments = []mezon.Attachment{
+			{
+				Filename: "",
+				Filetype: "image/png",
+				URL:      signedQRURL,
+				Width:    947,
+				Height:   2048,
+			},
+		}
+	}
+
+	if err := b.replyWithOptions(m, sb.String(), opts); err != nil {
+		b.logger().Error("failed to send money split message", "err", err)
+		_ = b.reply(m, fmt.Sprintf("⚠️ Gửi bảng chia tiền thất bại: %v", err))
+	}
+}
+
+func (b *Bot) handleRegisterQRCommand(m *mezon.ChannelMessage, rawText string) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+
+	parts := strings.Fields(rawText)
+	if len(parts) < 3 {
+		_ = b.reply(m, "⚠️ Vui lòng cung cấp link QR: `*register qr <link_ảnh_qr>`")
+		return
+	}
+
+	newQR := parts[2]
+	sportMgr.SetPaymentQR(newQR)
+	_ = b.reply(m, fmt.Sprintf("✅ Đã cập nhật mã QR thanh toán thành công!\nLink: %s", newQR))
+}
+
 func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 	help := "🤖 **Mezon Bot Hub**\n\n" +
 		"💰 **Quỹ & Tài chính:**\n" +
@@ -667,7 +792,9 @@ func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 		"🏸 **Cầu lông & Thể thao:**\n" +
 		"• `*diemdanh`: Gửi thông báo điểm danh cho buổi đánh cầu tiếp theo\n" +
 		"• `*nhaclich`: Nhắc lịch trước giờ đánh & AI tóm tắt ai đi ai nghỉ, sân nào\n" +
-		"• `*summary`: Xem nhanh danh sách điểm danh và sân bãi hiện tại\n\n" +
+		"• `*summary`: Xem nhanh danh sách điểm danh và sân bãi hiện tại\n" +
+		"• `*money <số_tiền>`: Chia tiền buổi đánh hôm trước, tag người tham gia + tính tiền theo slot + gửi mã QR (ví dụ: `*money 45k`)\n" +
+		"• `*money qr <link>`: Cập nhật mã QR thanh toán mới\n\n" +
 		"• `*help`: Hiển thị hướng dẫn này"
 	_ = b.reply(m, help)
 }

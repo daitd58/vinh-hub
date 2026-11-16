@@ -205,6 +205,7 @@ func main() {
 			OpenAIBaseURL: cfg.Sport.OpenAIBaseURL,
 			OpenAIModel:   cfg.Sport.OpenAIModel,
 			GeminiKey:     cfg.Sport.GeminiKey,
+			PaymentQR:     cfg.Sport.PaymentQR,
 			Timezone:      cfg.Fund.Timezone,
 			Log:           logger,
 		}, mezonBot)

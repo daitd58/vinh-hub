@@ -173,11 +173,11 @@ func TestManager_RecordReaction(t *testing.T) {
 	}, sender)
 
 	// User 1 reacts :cong1: (going)
-	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", false)
+	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", false, 1)
 	// User 2 reacts :tru1: (not going)
-	mgr.RecordReaction("sport-chan", "m1", "u2", "hoang.nguyen", ":tru1:", false)
+	mgr.RecordReaction("sport-chan", "m1", "u2", "hoang.nguyen", ":tru1:", false, 1)
 	// User 3 reacts cong1 (going)
-	mgr.RecordReaction("sport-chan", "m1", "u3", "nam.nguyen", "cong1", false)
+	mgr.RecordReaction("sport-chan", "m1", "u3", "nam.nguyen", "cong1", false, 1)
 
 	summary := mgr.SummarizeMessages(context.Background(), nil)
 	if len(summary.Going) != 2 {
@@ -188,7 +188,7 @@ func TestManager_RecordReaction(t *testing.T) {
 	}
 
 	// User 2 switches to :cong1:
-	mgr.RecordReaction("sport-chan", "m1", "u2", "hoang.nguyen", ":cong1:", false)
+	mgr.RecordReaction("sport-chan", "m1", "u2", "hoang.nguyen", ":cong1:", false, 1)
 	summary2 := mgr.SummarizeMessages(context.Background(), nil)
 	if len(summary2.Going) != 3 {
 		t.Errorf("expected 3 going after switch, got %d: %v", len(summary2.Going), summary2.Going)
@@ -198,7 +198,7 @@ func TestManager_RecordReaction(t *testing.T) {
 	}
 
 	// User 1 removes reaction (undo)
-	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", true)
+	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", true, 0)
 	summary3 := mgr.SummarizeMessages(context.Background(), nil)
 	if len(summary3.Going) != 2 {
 		t.Errorf("expected 2 going after un-react, got %d: %v", len(summary3.Going), summary3.Going)
@@ -300,5 +300,131 @@ func TestManager_OpenAISummary(t *testing.T) {
 	summary := mgr.SummarizeMessages(context.Background(), mgr.state.Messages)
 	if !strings.Contains(summary.RawAI, "Sân Minh Hải 19:30") {
 		t.Errorf("expected OpenAI response in RawAI, got %q", summary.RawAI)
+	}
+}
+
+func TestParseMoneyAmount(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    int
+		wantErr bool
+	}{
+		{"45k", 45000, false},
+		{"45K", 45000, false},
+		{"45000", 45000, false},
+		{"45.000", 45000, false},
+		{"45,000", 45000, false},
+		{"45", 45000, false},
+		{"45k vnđ", 45000, false},
+		{"50k", 50000, false},
+		{"0", 0, true},
+		{"-45k", 0, true},
+		{"abc", 0, true},
+		{"", 0, true},
+	}
+
+	for _, tt := range tests {
+		got, err := ParseMoneyAmount(tt.input)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("ParseMoneyAmount(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			continue
+		}
+		if !tt.wantErr && got != tt.want {
+			t.Errorf("ParseMoneyAmount(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestMoneyBillSplittingWithMultiSlot(t *testing.T) {
+	sender := &mockSender{}
+	mgr := NewManager(Config{
+		Enabled:   true,
+		ChannelID: "sport-chan",
+		StatePath: t.TempDir() + "/badminton.json",
+	}, sender)
+
+	// Simulate 8 participants, with User 1 reacting :cong1: 2 times (2 slots)
+	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", false, 2)
+	mgr.RecordReaction("sport-chan", "m1", "u2", "user2", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u3", "user3", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u4", "user4", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u5", "user5", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u6", "user6", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u7", "user7", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u8", "user8", ":cong1:", false, 1)
+
+	// User 9 reacted :tru1: (off)
+	mgr.RecordReaction("sport-chan", "m1", "u9", "user9_off", ":tru1:", false, 1)
+
+	_, _, participants := mgr.GetParticipantsForMoney()
+	if len(participants) != 8 {
+		t.Fatalf("expected 8 participants, got %d", len(participants))
+	}
+
+	totalSlots := 0
+	var u1Slots int
+	for _, p := range participants {
+		totalSlots += p.Slots
+		if p.Username == "dai.trinhduc" {
+			u1Slots = p.Slots
+		}
+	}
+
+	if u1Slots != 2 {
+		t.Errorf("expected dai.trinhduc to have 2 slots, got %d", u1Slots)
+	}
+	if totalSlots != 9 {
+		t.Errorf("expected total slots 9, got %d", totalSlots)
+	}
+
+	unitAmount := 45000
+	u1Amount := u1Slots * unitAmount
+	if u1Amount != 90000 {
+		t.Errorf("expected dai.trinhduc to owe 90k, got %d", u1Amount)
+	}
+
+	totalAmount := totalSlots * unitAmount
+	if totalAmount != 405000 {
+		t.Errorf("expected total amount 405k, got %d", totalAmount)
+	}
+}
+
+func TestPreviousMatchArchivingOnTriggerDiemDanh(t *testing.T) {
+	sender := &mockSender{}
+	mgr := NewManager(Config{
+		Enabled:   true,
+		ChannelID: "sport-chan",
+		RoleID:    "1840693979155271680",
+		RoleName:  "Vinh-CL",
+		StatePath: t.TempDir() + "/badminton.json",
+	}, sender)
+
+	// Match 1: Tuesday
+	mgr.state.MatchDay = "Thứ Ba"
+	mgr.state.MatchDate = "17/11/2026"
+	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", false, 2)
+	mgr.RecordReaction("sport-chan", "m1", "u2", "nam.nguyen", ":cong1:", false, 1)
+
+	// Trigger Next Diem danh for Thursday (Wednesday 9am)
+	wedNow := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	if err := mgr.TriggerDiemDanh(context.Background(), wedNow); err != nil {
+		t.Fatalf("TriggerDiemDanh failed: %v", err)
+	}
+
+	// Verify previous match was archived
+	if len(mgr.state.PreviousMatchParticipants) != 2 {
+		t.Fatalf("expected 2 previous match participants, got %d", len(mgr.state.PreviousMatchParticipants))
+	}
+	if mgr.state.PreviousMatchDay != "Thứ Ba" || mgr.state.PreviousMatchDate != "17/11/2026" {
+		t.Errorf("unexpected previous match day/date: %s %s", mgr.state.PreviousMatchDay, mgr.state.PreviousMatchDate)
+	}
+
+	// Now call GetParticipantsForMoney: since current session match is in the future (Thursday), it should return Tuesday's previous match
+	day, date, participants := mgr.GetParticipantsForMoney()
+	if day != "Thứ Ba" || date != "17/11/2026" {
+		t.Errorf("expected previous match Tuesday 17/11/2026, got %s %s", day, date)
+	}
+	if len(participants) != 2 {
+		t.Fatalf("expected 2 participants from previous match, got %d", len(participants))
 	}
 }
