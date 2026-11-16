@@ -28,18 +28,18 @@ func (m *mockSender) SendToChannel(ctx context.Context, channelID string, text s
 func TestNextMatchInfo(t *testing.T) {
 	loc := time.FixedZone("ICT", 7*3600)
 
-	// Monday Nov 16, 2026 -> Tuesday Nov 17, 2026 at 18:00
+	// Monday Nov 16, 2026 -> Tuesday Nov 17, 2026 (19:00 - 19:30)
 	mon := time.Date(2026, 11, 16, 9, 0, 0, 0, loc)
 	day, date, matchTime := NextMatchInfo(mon)
-	if day != "Thứ Ba" || date != "17/11/2026" || matchTime != "18:00" {
-		t.Errorf("expected Thu Ba 17/11/2026 18:00, got %s %s %s", day, date, matchTime)
+	if day != "Thứ Ba" || date != "17/11/2026" || matchTime != "19:00 - 19:30" {
+		t.Errorf("expected Thu Ba 17/11/2026 19:00 - 19:30, got %s %s %s", day, date, matchTime)
 	}
 
-	// Wednesday Nov 18, 2026 -> Thursday Nov 19, 2026 at 18:00
+	// Wednesday Nov 18, 2026 -> Thursday Nov 19, 2026 (19:00 - 19:30)
 	wed := time.Date(2026, 11, 18, 9, 0, 0, 0, loc)
 	day, date, matchTime = NextMatchInfo(wed)
-	if day != "Thứ Năm" || date != "19/11/2026" || matchTime != "18:00" {
-		t.Errorf("expected Thu Nam 19/11/2026 18:00, got %s %s %s", day, date, matchTime)
+	if day != "Thứ Năm" || date != "19/11/2026" || matchTime != "19:00 - 19:30" {
+		t.Errorf("expected Thu Nam 19/11/2026 19:00 - 19:30, got %s %s %s", day, date, matchTime)
 	}
 
 	// Friday Nov 20, 2026 -> Saturday Nov 21, 2026 at 14:00
@@ -47,6 +47,43 @@ func TestNextMatchInfo(t *testing.T) {
 	day, date, matchTime = NextMatchInfo(fri)
 	if day != "Thứ Bảy" || date != "21/11/2026" || matchTime != "14:00" {
 		t.Errorf("expected Thu Bay 21/11/2026 14:00, got %s %s %s", day, date, matchTime)
+	}
+}
+
+func TestExtractMatchTime(t *testing.T) {
+	// Case 1: 19:30 detected on Tuesday
+	msgs := []MessageRecord{
+		{Username: "user1", Content: "+1"},
+		{Username: "user2", Content: "đặt sân rồi nha, 19:30 sân Minh Hải"},
+	}
+	h, m, found, str := ExtractMatchTime(msgs, false)
+	if !found || h != 19 || m != 30 || str != "19:30" {
+		t.Errorf("expected 19:30, got %d:%d (%s), found=%v", h, m, str, found)
+	}
+
+	// Case 2: 19h detected
+	msgs2 := []MessageRecord{
+		{Username: "user1", Content: "chốt 19h sân 1 sân 2 nha"},
+	}
+	h, m, found, str = ExtractMatchTime(msgs2, false)
+	if !found || h != 19 || m != 0 || str != "19:00" {
+		t.Errorf("expected 19:00, got %d:%d (%s), found=%v", h, m, str, found)
+	}
+
+	// Case 3: Saturday 2-4
+	msgs3 := []MessageRecord{
+		{Username: "user1", Content: "vay chac e dat 2 san 2-4 nha"},
+	}
+	h, m, found, str = ExtractMatchTime(msgs3, true)
+	if !found || h != 14 || m != 0 || str != "14:00" {
+		t.Errorf("expected 14:00 on Saturday, got %d:%d (%s), found=%v", h, m, str, found)
+	}
+
+	// Case 4: No time found -> returns fallback default
+	var emptyMsgs []MessageRecord
+	h, m, found, str = ExtractMatchTime(emptyMsgs, false)
+	if found || h != 19 || m != 0 || str != "19:00 - 19:30" {
+		t.Errorf("expected fallback 19:00 - 19:30, got %d:%d (%s), found=%v", h, m, str, found)
 	}
 }
 

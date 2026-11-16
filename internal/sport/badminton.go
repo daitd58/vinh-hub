@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -207,32 +208,115 @@ func (m *Manager) tick(ctx context.Context, now time.Time) {
 		}
 	}
 
-	// 2. Match Reminder (1 hour before match):
-	// - Tuesday, Thursday at 17:00 (Match at 18:00)
-	// - Saturday at 13:00 (Match at 14:00)
-	isReminderTime := false
-	if (weekday == time.Tuesday || weekday == time.Thursday) && hour == 17 && minute == 0 {
-		isReminderTime = true
-	} else if weekday == time.Saturday && hour == 13 && minute == 0 {
-		isReminderTime = true
-	}
-
-	if isReminderTime {
-		slotKey := now.Format("2006-01-02_15")
+	// 2. Match Reminder on match days (Tuesday, Thursday, Saturday):
+	// Reads messages to detect the confirmed booking time (e.g. 19:00 vs 19:30, or Saturday 14:00)
+	// and sends the reminder 1 hour beforehand.
+	isMatchDay := (weekday == time.Tuesday || weekday == time.Thursday || weekday == time.Saturday)
+	if isMatchDay {
 		m.mu.Lock()
-		already := m.state.LastReminder == slotKey
+		msgs := append([]MessageRecord(nil), m.state.Messages...)
 		m.mu.Unlock()
-		if !already {
-			m.mu.Lock()
-			m.state.LastReminder = slotKey
-			m.saveStateLocked()
-			m.mu.Unlock()
 
-			if err := m.TriggerReminder(ctx, now); err != nil {
-				m.log.Error("failed to trigger auto reminder", "err", err)
+		isSat := (weekday == time.Saturday)
+		matchHour, matchMin, foundTime, matchTimeStr := ExtractMatchTime(msgs, isSat)
+
+		remindHour := matchHour - 1
+		remindMin := matchMin
+
+		// If time was not explicitly found in messages, set fallback default:
+		// - Tue/Thu: remind at 18:00 (1 hour before 19:00)
+		// - Sat: remind at 13:00 (1 hour before 14:00)
+		if !foundTime {
+			if isSat {
+				remindHour = 13
+				remindMin = 0
+			} else {
+				remindHour = 18
+				remindMin = 0
+			}
+		}
+
+		if hour == remindHour && minute == remindMin {
+			slotKey := now.Format("2006-01-02_reminder")
+			m.mu.Lock()
+			already := m.state.LastReminder == slotKey
+			m.mu.Unlock()
+			if !already {
+				m.mu.Lock()
+				m.state.LastReminder = slotKey
+				m.saveStateLocked()
+				m.mu.Unlock()
+
+				m.log.Info("triggering match reminder based on detected time",
+					"detected_time", matchTimeStr, "found", foundTime, "remind_at", fmt.Sprintf("%02d:%02d", remindHour, remindMin))
+
+				if err := m.TriggerReminderWithTime(ctx, now, matchTimeStr, foundTime); err != nil {
+					m.log.Error("failed to trigger auto reminder", "err", err)
+				}
 			}
 		}
 	}
+}
+
+// ExtractMatchTime parses messages to determine the confirmed booking time.
+// On Tuesdays/Thursdays, typical booking time is 19:00 or 19:30 (with a ~30m variance).
+// On Saturdays, typical booking time is 14:00 (e.g. "2-4", "2-3", "13h30", "14h").
+func ExtractMatchTime(messages []MessageRecord, isSaturday bool) (hour int, min int, found bool, formatted string) {
+	reColon := regexp.MustCompile(`(?i)\b(1[2-9]|2[0-2]):([0-5][0-9])\b`)
+	reHM := regexp.MustCompile(`(?i)\b(1[2-9]|2[0-2])h([0-5][0-9])\b`)
+	reH := regexp.MustCompile(`(?i)\b(1[2-9]|2[0-2])h\b`)
+	reEveningHM := regexp.MustCompile(`(?i)\b(6|7|8)h([0-5][0-9])\b`)
+	reEveningH := regexp.MustCompile(`(?i)\b(6|7|8)h\b`)
+	reSatRange := regexp.MustCompile(`(?i)\b(1|2|3)\s*[-h]\s*(3|4|5)\b`)
+
+	// Scan messages from newest to oldest for the latest booking confirmation
+	for i := len(messages) - 1; i >= 0; i-- {
+		c := strings.ToLower(messages[i].Content)
+
+		// 1. Exact HH:MM (e.g. 19:30, 19:00, 18:30)
+		if m := reColon.FindStringSubmatch(c); len(m) == 3 {
+			h, _ := strconv.Atoi(m[1])
+			mn, _ := strconv.Atoi(m[2])
+			return h, mn, true, fmt.Sprintf("%02d:%02d", h, mn)
+		}
+
+		// 2. Exact HHhMM (e.g. 19h30, 18h30)
+		if m := reHM.FindStringSubmatch(c); len(m) == 3 {
+			h, _ := strconv.Atoi(m[1])
+			mn, _ := strconv.Atoi(m[2])
+			return h, mn, true, fmt.Sprintf("%02d:%02d", h, mn)
+		}
+
+		// 3. Exact HHh (e.g. 19h, 18h)
+		if m := reH.FindStringSubmatch(c); len(m) == 2 {
+			h, _ := strconv.Atoi(m[1])
+			return h, 0, true, fmt.Sprintf("%02d:00", h)
+		}
+
+		// 4. Evening shorthand like 7h30 -> 19:30, 7h -> 19:00
+		if m := reEveningHM.FindStringSubmatch(c); len(m) == 3 {
+			h, _ := strconv.Atoi(m[1])
+			mn, _ := strconv.Atoi(m[2])
+			return h + 12, mn, true, fmt.Sprintf("%02d:%02d", h+12, mn)
+		}
+		if m := reEveningH.FindStringSubmatch(c); len(m) == 2 {
+			h, _ := strconv.Atoi(m[1])
+			return h + 12, 0, true, fmt.Sprintf("%02d:00", h+12)
+		}
+
+		// 5. Saturday shorthand like "2-4", "2h-4h" -> 14:00
+		if isSaturday {
+			if m := reSatRange.FindStringSubmatch(c); len(m) >= 2 {
+				h, _ := strconv.Atoi(m[1])
+				return h + 12, 0, true, fmt.Sprintf("%02d:00", h+12)
+			}
+		}
+	}
+
+	if isSaturday {
+		return 14, 0, false, "14:00"
+	}
+	return 19, 0, false, "19:00 - 19:30"
 }
 
 // NextMatchInfo returns the match day and time for a check-in call on the given day.
@@ -243,25 +327,25 @@ func NextMatchInfo(now time.Time) (matchDay, matchDate, matchTime string) {
 
 	switch weekday {
 	case time.Monday:
-		// Điểm danh T2 cho T3 lúc 18:00
+		// Điểm danh T2 cho T3 (thường 19:00 - 19:30)
 		targetTime = now.AddDate(0, 0, 1)
 		matchDay = "Thứ Ba"
-		mTime = "18:00"
+		mTime = "19:00 - 19:30"
 	case time.Wednesday:
-		// Điểm danh T4 cho T5 lúc 18:00
+		// Điểm danh T4 cho T5 (thường 19:00 - 19:30)
 		targetTime = now.AddDate(0, 0, 1)
 		matchDay = "Thứ Năm"
-		mTime = "18:00"
+		mTime = "19:00 - 19:30"
 	case time.Friday:
-		// Điểm danh T6 cho T7 lúc 14:00
+		// Điểm danh T6 cho T7 (thường 14:00 chiều)
 		targetTime = now.AddDate(0, 0, 1)
 		matchDay = "Thứ Bảy"
 		mTime = "14:00"
 	default:
-		// Mặc định ngày mai hoặc ngày đánh gần nhất
+		// Mặc định ngày mai
 		targetTime = now.AddDate(0, 0, 1)
 		matchDay = "ngày mai"
-		mTime = "18:00"
+		mTime = "19:00 - 19:30"
 	}
 
 	matchDate = targetTime.Format("02/01/2006")
@@ -286,7 +370,7 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 	tag := "@" + m.cfg.RoleName
 	msg := fmt.Sprintf(
 		"🏸 **[ĐIỂM DANH CẦU LÔNG - %s (%s)]**\n\n"+
-			"Chào cả nhà %s! Lịch đánh cầu lông tiếp theo diễn ra vào **%s (%s)** lúc **%s**.\n\n"+
+			"Chào cả nhà %s! Lịch đánh cầu lông tiếp theo diễn ra vào **%s (%s)** (khung giờ dự kiến: **%s**).\n\n"+
 			"👉 Mọi người vào điểm danh xác nhận tham gia (+1 / đi / bận / off) trước **16:00** chiều nay/ngày mai để tiện chốt người và đặt sân nhé! 🔥",
 		strings.ToUpper(matchDay), matchDate, tag, matchDay, matchDate, matchTime,
 	)
@@ -298,19 +382,24 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 func (m *Manager) TriggerReminder(ctx context.Context, now time.Time) error {
 	m.mu.Lock()
 	messages := append([]MessageRecord(nil), m.state.Messages...)
+	isSat := now.Weekday() == time.Saturday
+	_, _, foundTime, detectedTime := ExtractMatchTime(messages, isSat)
+	m.mu.Unlock()
+
+	return m.TriggerReminderWithTime(ctx, now, detectedTime, foundTime)
+}
+
+// TriggerReminderWithTime sends the reminder using the detected match time.
+func (m *Manager) TriggerReminderWithTime(ctx context.Context, now time.Time, matchTimeStr string, isExplicitTime bool) error {
+	m.mu.Lock()
+	messages := append([]MessageRecord(nil), m.state.Messages...)
 	matchDay := m.state.MatchDay
 	matchDate := m.state.MatchDate
-	matchTime := m.state.MatchTime
 	m.mu.Unlock()
 
 	if matchDay == "" {
 		matchDay = "Hôm nay"
 		matchDate = now.Format("02/01/2006")
-		if now.Weekday() == time.Saturday {
-			matchTime = "14:00"
-		} else {
-			matchTime = "18:00"
-		}
 	}
 
 	summary := m.SummarizeMessages(ctx, messages)
@@ -318,8 +407,14 @@ func (m *Manager) TriggerReminder(ctx context.Context, now time.Time) error {
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🏸 **[NHẮC LỊCH ĐÁNH CẦU - %s (%s)]**\n\n", strings.ToUpper(matchDay), matchDate))
-	sb.WriteString(fmt.Sprintf("Chào %s, còn **1 tiếng** nữa là đến giờ quật cầu rồi (⏰ **%s**)! 🏸\n\n", tag, matchTime))
-	sb.WriteString("📋 **TỔNG KẾT TÌNH HÌNH ĐIỂM DANH:**\n")
+
+	if isExplicitTime {
+		sb.WriteString(fmt.Sprintf("Chào %s, còn **1 tiếng** nữa là đến giờ quật cầu rồi (⏰ **%s** hôm nay)! 🏸\n\n", tag, matchTimeStr))
+	} else {
+		sb.WriteString(fmt.Sprintf("Chào %s, chuẩn bị đồ đạc nào, còn **1 tiếng** nữa là đến giờ đánh cầu dự kiến (⏰ **%s**)! 🏸\n\n", tag, matchTimeStr))
+	}
+
+	sb.WriteString("📋 **TỔNG KẾT TÌNH HÌNH ĐIỂM DANH & ĐẶT SÂN:**\n")
 
 	if summary.RawAI != "" {
 		sb.WriteString(summary.RawAI)
@@ -338,7 +433,13 @@ func (m *Manager) TriggerReminder(ctx context.Context, now time.Time) error {
 		if summary.CourtInfo != "" {
 			sb.WriteString(fmt.Sprintf("• 🏟️ **Sân bãi:** %s\n", summary.CourtInfo))
 		} else {
-			sb.WriteString("• 🏟️ **Sân bãi:** Chưa thấy thông tin chốt sân (anh em chủ động kiểm tra/đặt sân nhé!)\n")
+			sb.WriteString("• 🏟️ **Sân bãi:** Chưa thấy thông tin chốt sân trên nhóm (anh em kiểm tra/đặt sân nhé!)\n")
+		}
+
+		if isExplicitTime {
+			sb.WriteString(fmt.Sprintf("• ⏰ **Giờ đánh đã đặt:** %s (nhắc trước 1 tiếng)\n", matchTimeStr))
+		} else {
+			sb.WriteString(fmt.Sprintf("• ⏰ **Giờ đánh dự kiến:** %s (vui lòng kiểm tra lại giờ sân đã đặt)\n", matchTimeStr))
 		}
 
 		if len(summary.Notes) > 0 {
