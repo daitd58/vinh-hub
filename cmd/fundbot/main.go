@@ -144,6 +144,8 @@ func main() {
 		ThreadName:       cfg.Mezon.ThreadName,
 		SportClanID:      cfg.Sport.ClanID,
 		SportChannelID:   cfg.Sport.ChannelID,
+		SportCong1EmojiID: cfg.Sport.Cong1EmojiID,
+		SportTru1EmojiID:  cfg.Sport.Tru1EmojiID,
 		FundReader:       fundReader,
 		Timezone:         cfg.Fund.Timezone,
 		Log:              logger,

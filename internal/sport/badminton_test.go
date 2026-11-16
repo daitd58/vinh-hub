@@ -157,8 +157,8 @@ func TestManager_TriggerDiemDanh(t *testing.T) {
 	}
 
 	// Verify auto reactions seeded
-	if len(sender.reactions) != 2 || sender.reactions[0] != "cong1" || sender.reactions[1] != "tru1" {
-		t.Errorf("expected auto reactions [cong1, tru1], got %v", sender.reactions)
+	if len(sender.reactions) != 2 || sender.reactions[0] != ":cong1:" || sender.reactions[1] != ":tru1:" {
+		t.Errorf("expected auto reactions [:cong1:, :tru1:], got %v", sender.reactions)
 	}
 }
 

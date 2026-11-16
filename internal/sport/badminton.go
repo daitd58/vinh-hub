@@ -160,8 +160,8 @@ func (m *Manager) RecordReaction(channelID, messageID, userID, username, emoji s
 	}
 
 	cleanEmoji := strings.ToLower(strings.Trim(emoji, ":"))
-	isGoing := strings.Contains(cleanEmoji, "cong1") || cleanEmoji == "+1" || cleanEmoji == "👍"
-	isNotGoing := strings.Contains(cleanEmoji, "tru1") || cleanEmoji == "-1" || cleanEmoji == "👎"
+	isGoing := strings.Contains(cleanEmoji, "cong1") || cleanEmoji == "+1" || cleanEmoji == "👍" || cleanEmoji == "7239659508431615752"
+	isNotGoing := strings.Contains(cleanEmoji, "tru1") || cleanEmoji == "-1" || cleanEmoji == "👎" || cleanEmoji == "7294564276005201529"
 
 	if !isGoing && !isNotGoing {
 		return
@@ -460,8 +460,8 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 
 		// Auto-react with :cong1: and :tru1: to seed the buttons for members to click
 		if m.sender != nil {
-			_ = m.sender.ReactToMessage(ctx, m.cfg.ChannelID, msgID, "cong1")
-			_ = m.sender.ReactToMessage(ctx, m.cfg.ChannelID, msgID, "tru1")
+			_ = m.sender.ReactToMessage(ctx, m.cfg.ChannelID, msgID, ":cong1:")
+			_ = m.sender.ReactToMessage(ctx, m.cfg.ChannelID, msgID, ":tru1:")
 		}
 	}
 

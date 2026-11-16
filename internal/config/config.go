@@ -34,6 +34,8 @@ type SportConfig struct {
 	OpenAIBaseURL string
 	OpenAIModel   string
 	GeminiKey     string
+	Cong1EmojiID  string
+	Tru1EmojiID   string
 }
 
 // BotWalletConfig holds settings for the intermediary bot wallet.
@@ -132,6 +134,8 @@ func Load() *Config {
 	cfg.Sport.OpenAIBaseURL = strings.TrimSpace(env("OPENAI_BASE_URL", "https://llm.mrdnd.dev/v1"))
 	cfg.Sport.OpenAIModel = strings.TrimSpace(env("OPENAI_MODEL", "gpt-4o-mini"))
 	cfg.Sport.GeminiKey = strings.TrimSpace(env("GEMINI_API_KEY", ""))
+	cfg.Sport.Cong1EmojiID = strings.TrimSpace(env("SPORT_CONG1_EMOJI_ID", "7239659508431615752"))
+	cfg.Sport.Tru1EmojiID = strings.TrimSpace(env("SPORT_TRU1_EMOJI_ID", "7294564276005201529"))
 
 	// App
 	intervalSec := intEnv("COURIER_INTERVAL", 30)

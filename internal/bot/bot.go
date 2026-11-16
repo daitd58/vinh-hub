@@ -29,6 +29,8 @@ type Config struct {
 	ThreadName       string
 	SportClanID      string
 	SportChannelID   string
+	SportCong1EmojiID string
+	SportTru1EmojiID  string
 	FundReader       fund.BalanceReader
 	Timezone         *time.Location
 	Log              *slog.Logger
@@ -258,14 +260,47 @@ func (b *Bot) ReactToMessage(ctx context.Context, channelID, messageID, emoji st
 	if clanID == "" && ch.Clan != nil {
 		clanID = ch.Clan.ID
 	}
+	if clanID == "" {
+		clanID = "0"
+	}
+
+	// Ensure clan is attached to channel so socket operations have proper clan context
+	if clanID != "0" && (ch.Clan == nil || ch.Clan.ID == "" || ch.Clan.ID == "0") {
+		if clan, ok := b.client.Clans.Get(clanID); ok && clan != nil {
+			ch.Clan = clan
+		}
+	}
+
+	// Must join channel before reacting
+	_, _ = b.client.Socket().JoinChat(clanID, ch.ID, ch.ChannelType, !ch.IsPrivate)
+
+	mode := int(mezon.ConvertChannelTypeToChannelMode(ch.ChannelType))
+	isPublic := !ch.IsPrivate
+
+	emojiID := "0"
+	cleanEmoji := strings.ToLower(strings.Trim(emoji, ":"))
+	if strings.Contains(cleanEmoji, "cong1") || cleanEmoji == "+1" {
+		emojiID = b.cfg.SportCong1EmojiID
+		if emojiID == "" {
+			emojiID = "7239659508431615752"
+		}
+		emoji = ":cong1:"
+	} else if strings.Contains(cleanEmoji, "tru1") || cleanEmoji == "-1" {
+		emojiID = b.cfg.SportTru1EmojiID
+		if emojiID == "" {
+			emojiID = "7294564276005201529"
+		}
+		emoji = ":tru1:"
+	}
 
 	data := mezon.ReactMessageData{
 		ClanID:       clanID,
 		ChannelID:    channelID,
 		ChannelType:  ch.ChannelType,
-		Mode:         int(mezon.ConvertChannelTypeToChannelMode(ch.ChannelType)),
-		IsPublic:     !ch.IsPrivate,
+		Mode:         mode,
+		IsPublic:     isPublic,
 		MessageID:    messageID,
+		EmojiID:      emojiID,
 		Emoji:        emoji,
 		Count:        1,
 		ActionDelete: false,
@@ -280,6 +315,8 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 	sportMgr := b.sportMgr
 	sportChan := b.cfg.SportChannelID
 	botID := b.cfg.BotID
+	cong1ID := b.cfg.SportCong1EmojiID
+	tru1ID := b.cfg.SportTru1EmojiID
 	b.mu.RUnlock()
 
 	if sportMgr == nil {
@@ -307,7 +344,17 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 		}
 	}
 
-	sportMgr.RecordReaction(chanID, msgID, senderID, senderName, ev.Emoji, ev.Action)
+	emojiVal := ev.Emoji
+	if ev.EmojiId != 0 {
+		emojiIDStr := strconv.FormatInt(ev.EmojiId, 10)
+		if emojiIDStr == cong1ID || ev.EmojiId == 7239659508431615752 {
+			emojiVal = ":cong1:"
+		} else if emojiIDStr == tru1ID || ev.EmojiId == 7294564276005201529 {
+			emojiVal = ":tru1:"
+		}
+	}
+
+	sportMgr.RecordReaction(chanID, msgID, senderID, senderName, emojiVal, ev.Action)
 }
 
 // SendToThread sends a message to a thread or fallback channel.
