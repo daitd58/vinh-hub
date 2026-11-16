@@ -442,7 +442,7 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 	msg := fmt.Sprintf(
 		"🏸 **[ĐIỂM DANH CẦU LÔNG - %s (%s)]**\n\n"+
 			"Chào cả nhà %s! Lịch đánh cầu lông tiếp theo diễn ra vào **%s (%s)** (khung giờ dự kiến: **%s**).\n\n"+
-			"👉 Mọi người vào điểm danh xác nhận tham gia (+1 / đi / bận / off) trước **16:00** chiều nay để tiện chốt người và đặt sân nhé! 🔥\n\n"+
+			"👉 Mọi người vào điểm danh xác nhận tham gia trước **16:00** chiều nay để tiện chốt người và đặt sân nhé! 🔥\n\n"+
 			"*(Đi thì react :cong1:, không đi thì react :tru1: vào tin nhắn này nhé!)*",
 		strings.ToUpper(matchDay), matchDate, tag, matchDay, matchDate, matchTime,
 	)
