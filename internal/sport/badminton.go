@@ -49,6 +49,8 @@ type BillItem struct {
 // BillSession holds the current active payment/splitting session.
 type BillSession struct {
 	ID           string               `json:"id"`
+	BillNumber   int                  `json:"bill_number,omitempty"`
+	BillCode     string               `json:"bill_code,omitempty"`
 	MatchDay     string               `json:"match_day"`
 	MatchDate    string               `json:"match_date"`
 	CourtFee     int64                `json:"court_fee"`
@@ -109,6 +111,7 @@ type AttendanceState struct {
 	PreviousMatchDay           string                 `json:"previous_match_day,omitempty"`
 	PreviousMatchDate          string                 `json:"previous_match_date,omitempty"`
 	CustomPaymentQR            string                 `json:"custom_payment_qr,omitempty"`
+	NextBillNumber             int                    `json:"next_bill_number,omitempty"`
 	CurrentBill                *BillSession           `json:"current_bill,omitempty"`
 	BillHistory                []BillSession          `json:"bill_history,omitempty"`
 	MatchHistory               []MatchRecord          `json:"match_history,omitempty"`
@@ -211,13 +214,33 @@ func (m *Manager) loadState() {
 			if s.BillHistory == nil {
 				s.BillHistory = make([]BillSession, 0)
 			}
+			billNumSeq := 1
 			for i := range s.BillHistory {
 				if s.BillHistory[i].Items == nil {
 					s.BillHistory[i].Items = make(map[string]*BillItem)
 				}
+				if s.BillHistory[i].BillNumber <= 0 {
+					s.BillHistory[i].BillNumber = billNumSeq
+					s.BillHistory[i].ID = strconv.Itoa(billNumSeq)
+					s.BillHistory[i].BillCode = fmt.Sprintf("CL%d", billNumSeq)
+				}
+				if s.BillHistory[i].BillNumber >= billNumSeq {
+					billNumSeq = s.BillHistory[i].BillNumber + 1
+				}
 			}
-			if s.CurrentBill != nil && s.CurrentBill.Items == nil {
-				s.CurrentBill.Items = make(map[string]*BillItem)
+			if s.CurrentBill != nil {
+				if s.CurrentBill.Items == nil {
+					s.CurrentBill.Items = make(map[string]*BillItem)
+				}
+				if s.CurrentBill.BillNumber <= 0 {
+					s.CurrentBill.BillNumber = billNumSeq
+					s.CurrentBill.ID = strconv.Itoa(billNumSeq)
+					s.CurrentBill.BillCode = fmt.Sprintf("CL%d", billNumSeq)
+					billNumSeq++
+				}
+			}
+			if s.NextBillNumber < billNumSeq {
+				s.NextBillNumber = billNumSeq
 			}
 			for uid, uname := range s.ReactionsGoing {
 				if _, ok := s.GoingParticipants[uid]; !ok {
@@ -233,7 +256,7 @@ func (m *Manager) loadState() {
 				"session", s.SessionID, "messages", len(s.Messages),
 				"reactions_going", len(s.ReactionsGoing), "reactions_not_going", len(s.ReactionsNotGoing),
 				"participants", len(s.GoingParticipants), "matches_history", len(s.MatchHistory),
-				"bills_history", len(s.BillHistory))
+				"bills_history", len(s.BillHistory), "next_bill_number", s.NextBillNumber)
 			return
 		}
 	}
@@ -244,6 +267,7 @@ func (m *Manager) loadState() {
 		GoingParticipants: make(map[string]Participant),
 		BillHistory:       make([]BillSession, 0),
 		MatchHistory:      make([]MatchRecord, 0),
+		NextBillNumber:    1,
 	}
 }
 
@@ -556,6 +580,28 @@ func NextMatchInfo(now time.Time) (matchDay, matchDate, matchTime string) {
 
 	matchDate = targetTime.Format("02/01/2006")
 	return matchDay, matchDate, mTime
+}
+
+// DayOfWeekVietnamese converts time.Weekday to Vietnamese name.
+func DayOfWeekVietnamese(w time.Weekday) string {
+	switch w {
+	case time.Monday:
+		return "Thứ Hai"
+	case time.Tuesday:
+		return "Thứ Ba"
+	case time.Wednesday:
+		return "Thứ Tư"
+	case time.Thursday:
+		return "Thứ Năm"
+	case time.Friday:
+		return "Thứ Sáu"
+	case time.Saturday:
+		return "Thứ Bảy"
+	case time.Sunday:
+		return "Chủ Nhật"
+	default:
+		return ""
+	}
 }
 
 // TriggerDiemDanh sends the attendance call message to the sport channel.
@@ -1412,16 +1458,79 @@ func ParseSplitFormula(expr string) (*SplitBreakdown, error) {
 	return res, nil
 }
 
-// CreateSplitBill parses the split formula, fetches participants, rounds up slot price to 1,000 VND, and creates a BillSession.
-func (m *Manager) CreateSplitBill(expr string) (*BillSession, *SplitBreakdown, error) {
+// LookupParticipant searches existing attendance state, history, and records for a user by name or ID.
+func (m *Manager) LookupParticipant(query string) (userID, username string, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	clean := strings.ToLower(strings.TrimPrefix(query, "@"))
+	clean = strings.TrimSpace(clean)
+	if clean == "" {
+		return "", "", false
+	}
+
+	// 1. Current going participants
+	for uid, p := range m.state.GoingParticipants {
+		if strings.ToLower(strings.TrimPrefix(p.Username, "@")) == clean || uid == clean {
+			return p.UserID, p.Username, true
+		}
+	}
+
+	// 2. Previous match participants
+	for _, p := range m.state.PreviousMatchParticipants {
+		if strings.ToLower(strings.TrimPrefix(p.Username, "@")) == clean || p.UserID == clean {
+			return p.UserID, p.Username, true
+		}
+	}
+
+	// 3. Match history
+	for _, mh := range m.state.MatchHistory {
+		for _, p := range mh.Attendees {
+			if strings.ToLower(strings.TrimPrefix(p.Username, "@")) == clean || p.UserID == clean {
+				return p.UserID, p.Username, true
+			}
+		}
+	}
+
+	// 4. Message records
+	for _, msg := range m.state.Messages {
+		if strings.ToLower(strings.TrimPrefix(msg.Username, "@")) == clean || msg.UserID == clean {
+			return msg.UserID, msg.Username, true
+		}
+	}
+
+	return clean, clean, false
+}
+
+// CreateSplitBill parses the split formula, calculates slot price, and creates a BillSession.
+// If customParticipants are provided, it splits among them instead of fetching from attendance.
+func (m *Manager) CreateSplitBill(expr string, customParticipants ...Participant) (*BillSession, *SplitBreakdown, error) {
 	breakdown, err := ParseSplitFormula(expr)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	matchDay, matchDate, participants := m.GetParticipantsForMoney()
-	if len(participants) == 0 {
-		return nil, nil, fmt.Errorf("chưa có danh sách người tham gia buổi đánh hôm trước để chia tiền")
+	var matchDay, matchDate string
+	var participants []Participant
+
+	if len(customParticipants) > 0 {
+		participants = customParticipants
+		if m.state.PreviousMatchDate != "" {
+			matchDay = m.state.PreviousMatchDay
+			matchDate = m.state.PreviousMatchDate
+		} else if m.state.MatchDate != "" {
+			matchDay = m.state.MatchDay
+			matchDate = m.state.MatchDate
+		} else {
+			now := time.Now().In(m.cfg.Timezone)
+			matchDay = DayOfWeekVietnamese(now.Weekday())
+			matchDate = now.Format("02/01/2006")
+		}
+	} else {
+		matchDay, matchDate, participants = m.GetParticipantsForMoney()
+		if len(participants) == 0 {
+			return nil, nil, fmt.Errorf("chưa có danh sách người tham gia buổi đánh hôm trước để chia tiền. Bạn có thể tag trực tiếp người tham gia, ví dụ: `*split %s @user1 @user2`", expr)
+		}
 	}
 
 	totalSlots := 0
@@ -1440,6 +1549,8 @@ func (m *Manager) CreateSplitBill(expr string) (*BillSession, *SplitBreakdown, e
 
 	m.archivePreviousBillLocked()
 
+	billID, billNum, billCode := m.nextBillIDLocked()
+
 	items := make(map[string]*BillItem)
 	for _, p := range participants {
 		userAmount := int64(p.Slots) * slotPrice
@@ -1453,7 +1564,9 @@ func (m *Manager) CreateSplitBill(expr string) (*BillSession, *SplitBreakdown, e
 	}
 
 	bill := &BillSession{
-		ID:           fmt.Sprintf("bill-%s", matchDate),
+		ID:           billID,
+		BillNumber:   billNum,
+		BillCode:     billCode,
 		MatchDay:     matchDay,
 		MatchDate:    matchDate,
 		CourtFee:     breakdown.CourtFee,
@@ -1473,14 +1586,33 @@ func (m *Manager) CreateSplitBill(expr string) (*BillSession, *SplitBreakdown, e
 }
 
 // CreateMoneyBill creates a BillSession with a fixed per-slot price.
-func (m *Manager) CreateMoneyBill(unitAmount int) (*BillSession, error) {
+// If customParticipants are provided, it splits among them instead of fetching from attendance.
+func (m *Manager) CreateMoneyBill(unitAmount int, customParticipants ...Participant) (*BillSession, error) {
 	if unitAmount <= 0 {
 		return nil, fmt.Errorf("số tiền mỗi slot không hợp lệ")
 	}
 
-	matchDay, matchDate, participants := m.GetParticipantsForMoney()
-	if len(participants) == 0 {
-		return nil, fmt.Errorf("chưa có danh sách người tham gia buổi đánh hôm trước để chia tiền")
+	var matchDay, matchDate string
+	var participants []Participant
+
+	if len(customParticipants) > 0 {
+		participants = customParticipants
+		if m.state.PreviousMatchDate != "" {
+			matchDay = m.state.PreviousMatchDay
+			matchDate = m.state.PreviousMatchDate
+		} else if m.state.MatchDate != "" {
+			matchDay = m.state.MatchDay
+			matchDate = m.state.MatchDate
+		} else {
+			now := time.Now().In(m.cfg.Timezone)
+			matchDay = DayOfWeekVietnamese(now.Weekday())
+			matchDate = now.Format("02/01/2006")
+		}
+	} else {
+		matchDay, matchDate, participants = m.GetParticipantsForMoney()
+		if len(participants) == 0 {
+			return nil, fmt.Errorf("chưa có danh sách người tham gia buổi đánh hôm trước để chia tiền. Bạn có thể tag trực tiếp người tham gia, ví dụ: `*money %dk @user1 @user2`", unitAmount/1000)
+		}
 	}
 
 	totalSlots := 0
@@ -1499,6 +1631,8 @@ func (m *Manager) CreateMoneyBill(unitAmount int) (*BillSession, error) {
 
 	m.archivePreviousBillLocked()
 
+	billID, billNum, billCode := m.nextBillIDLocked()
+
 	items := make(map[string]*BillItem)
 	for _, p := range participants {
 		userAmount := int64(p.Slots) * slotPrice
@@ -1512,7 +1646,9 @@ func (m *Manager) CreateMoneyBill(unitAmount int) (*BillSession, error) {
 	}
 
 	bill := &BillSession{
-		ID:          fmt.Sprintf("bill-%s", matchDate),
+		ID:          billID,
+		BillNumber:  billNum,
+		BillCode:    billCode,
 		MatchDay:    matchDay,
 		MatchDate:   matchDate,
 		TotalAmount: totalAmount,
@@ -1527,11 +1663,40 @@ func (m *Manager) CreateMoneyBill(unitAmount int) (*BillSession, error) {
 	return bill, nil
 }
 
+func (m *Manager) nextBillIDLocked() (id string, billNum int, code string) {
+	if m.state.NextBillNumber <= 0 {
+		maxNum := 0
+		if m.state.CurrentBill != nil && m.state.CurrentBill.BillNumber > maxNum {
+			maxNum = m.state.CurrentBill.BillNumber
+		}
+		for _, b := range m.state.BillHistory {
+			if b.BillNumber > maxNum {
+				maxNum = b.BillNumber
+			}
+		}
+		if maxNum == 0 {
+			maxNum = len(m.state.BillHistory)
+			if m.state.CurrentBill != nil {
+				maxNum++
+			}
+		}
+		m.state.NextBillNumber = maxNum + 1
+	}
+
+	billNum = m.state.NextBillNumber
+	m.state.NextBillNumber++
+	id = strconv.Itoa(billNum)
+	code = fmt.Sprintf("CL%d", billNum)
+	return id, billNum, code
+}
+
 func (m *Manager) archivePreviousBillLocked() {
 	if m.state.CurrentBill != nil && len(m.state.CurrentBill.Items) > 0 {
 		already := false
 		for i, old := range m.state.BillHistory {
-			if old.ID == m.state.CurrentBill.ID || (old.MessageID != "" && old.MessageID == m.state.CurrentBill.MessageID) {
+			if old.ID == m.state.CurrentBill.ID ||
+				(old.BillNumber > 0 && old.BillNumber == m.state.CurrentBill.BillNumber) ||
+				(old.MessageID != "" && old.MessageID == m.state.CurrentBill.MessageID) {
 				m.state.BillHistory[i] = *m.state.CurrentBill
 				already = true
 				break
@@ -1549,21 +1714,62 @@ func (m *Manager) findBillLocked(filter string) *BillSession {
 		return m.state.CurrentBill
 	}
 
-	cleanFilter := strings.ReplaceAll(filter, "/", "")
-	cleanFilter = strings.ReplaceAll(cleanFilter, "-", "")
-	cleanFilter = strings.ToLower(cleanFilter)
+	cleanFilter := strings.TrimPrefix(filter, "#")
+	cleanFilter = strings.TrimSpace(cleanFilter)
+	cleanUpper := strings.ToUpper(cleanFilter)
 
-	if m.state.CurrentBill != nil {
-		curDate := strings.ReplaceAll(m.state.CurrentBill.MatchDate, "/", "")
-		if strings.Contains(curDate, cleanFilter) || strings.Contains(strings.ToLower(m.state.CurrentBill.MatchDay), cleanFilter) {
-			return m.state.CurrentBill
+	// Check if filter is explicitly numeric ID or CL-prefixed ID
+	var filterNum int
+	isIDFilter := false
+	if num, err := strconv.Atoi(cleanFilter); err == nil && num > 0 && len(cleanFilter) < 4 {
+		filterNum = num
+		isIDFilter = true
+	} else if strings.HasPrefix(cleanUpper, "CL") {
+		numPart := strings.TrimPrefix(cleanUpper, "CL")
+		if num, err := strconv.Atoi(numPart); err == nil && num > 0 {
+			filterNum = num
+			isIDFilter = true
 		}
+	}
+
+	matches := func(b *BillSession) bool {
+		if b == nil {
+			return false
+		}
+		if isIDFilter {
+			return b.BillNumber == filterNum || b.ID == cleanFilter || b.BillCode == cleanUpper
+		}
+		// Match exact ID (e.g. "1")
+		if b.ID == filter || b.ID == cleanFilter {
+			return true
+		}
+		// Match BillCode (e.g. "CL1", "cl1")
+		if b.BillCode != "" && (b.BillCode == cleanUpper || strings.EqualFold(b.BillCode, filter)) {
+			return true
+		}
+		// Match date ONLY if filter looks like a date (has '/' or '-' or is 4+ digits) or day name
+		if strings.Contains(filter, "/") || strings.Contains(filter, "-") || len(cleanFilter) >= 4 {
+			cleanDateFilter := strings.ReplaceAll(filter, "/", "")
+			cleanDateFilter = strings.ReplaceAll(cleanDateFilter, "-", "")
+			cleanDateFilter = strings.ToLower(cleanDateFilter)
+			bDate := strings.ReplaceAll(b.MatchDate, "/", "")
+			if cleanDateFilter != "" && strings.Contains(bDate, cleanDateFilter) {
+				return true
+			}
+			if cleanDateFilter != "" && strings.Contains(strings.ToLower(b.MatchDay), cleanDateFilter) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if matches(m.state.CurrentBill) {
+		return m.state.CurrentBill
 	}
 
 	for i := len(m.state.BillHistory) - 1; i >= 0; i-- {
 		b := &m.state.BillHistory[i]
-		bDate := strings.ReplaceAll(b.MatchDate, "/", "")
-		if strings.Contains(bDate, cleanFilter) || strings.Contains(strings.ToLower(b.MatchDay), cleanFilter) {
+		if matches(b) {
 			return b
 		}
 	}

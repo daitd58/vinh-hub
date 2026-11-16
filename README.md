@@ -191,22 +191,25 @@ When the bot is running in your channel or thread:
 - `*diemdanh` (hoặc `*vinhhub diemdanh`): Kích hoạt ngay thông báo điểm danh cho buổi đánh tiếp theo (ping role `@Vinh-CL`).
 - `*nhaclich`: Gửi ngay tin nhắn nhắc lịch kèm AI tóm tắt danh sách tham gia, vắng mặt, và sân bãi.
 - `*summary`: Xem nhanh tình hình điểm danh hiện tại mà không cần đợi cron.
-- `*split <công_thức>`: Chia tiền sân + cầu linh hoạt (ví dụ: `*split 360k + 26*3`, `*split 360k + 26k*4`, `*split 360k san 45k cau`, `*split 450k`). Tự động tính tổng tiền, chia đều theo slot buổi đánh hôm trước, làm tròn lên 1.000đ, tag người tham gia và gửi mã QR thanh toán.
-- `*money <số_tiền>`: Chia tiền theo đơn giá slot cố định (ví dụ: `*money 45k`).
-- `*paid [ngày] [@user...]`:
+- `*split <công_thức> [tag]`: Chia tiền sân + cầu linh hoạt (ví dụ: `*split 360k + 26*9`, `*split 360k + 26*9 @user1 @user2`, `*split 360k san 45k cau`, `*split 450k`).
+  - Nếu **không tag**: Tự động lấy danh sách người tham gia từ buổi điểm danh gần nhất.
+  - Nếu **có tag**: Chia trực tiếp cho những người được tag (hỗ trợ số slot tuỳ chọn: `@user:2 @user2:1` hoặc `[@user1, @user2]`).
+  - Mỗi hoá đơn được tự động cấp một **Mã hoá đơn (ID)** ngắn gọn duy nhất: `CL1`, `CL2`, ... (hoặc `#1`, `#2`).
+- `*money <số_tiền> [tag]`: Chia tiền theo đơn giá slot cố định (ví dụ: `*money 45k` hoặc `*money 45k @user1 @user2`).
+- `*paid [mã/ngày] [@user...]`:
   - `*paid`: Hiển thị dashboard tiến độ thu tiền buổi gần nhất (ai đã đóng, ai chưa đóng, tổng đã thu / còn thiếu).
-  - `*paid 17/11` (hoặc `*paid 1711`): Xem dashboard tiến độ thu tiền của buổi ngày 17/11 trong lịch sử.
-  - `*paid @user1 @user2`: Đánh dấu thành viên đã thanh toán buổi hiện tại.
-  - `*paid 17/11 @user1`: Đánh dấu thành viên đã thanh toán cho buổi ngày 17/11.
+  - `*paid 1` (hoặc `*paid CL1`, `*paid #1`): Xem dashboard thu tiền theo mã hoá đơn.
+  - `*paid 17/11`: Xem dashboard thu tiền theo ngày đánh.
+  - `*paid 1 @user1 @user2`: Đánh dấu thành viên đã thanh toán cho hoá đơn 1.
+  - `*paid @user1`: Đánh dấu thành viên đã thanh toán cho hoá đơn hiện tại.
   - *Mẹo*: Thành viên có thể react `:checked:`, `:check:` (custom emoji trong clan KOMU) hoặc `✅`, `💵`, `👍` trực tiếp vào tin nhắn chia tiền để bot tự động ghi nhận đã đóng tiền cho đúng buổi đó! Bot cũng tự động thả sẵn reaction `:checked:` để mọi người bấm 1 chạm.
-- `*unpaid [ngày] [@user...]`:
+- `*unpaid [mã/ngày] [@user...]`:
   - `*unpaid`: Lọc danh sách những người chưa đóng tiền buổi gần nhất, tag trực tiếp để nhắc nhở và đính kèm mã QR thanh toán + cú pháp chuyển khoản.
-  - `*unpaid 17/11`: Lọc danh sách và nhắc nhở những người chưa đóng tiền của buổi ngày 17/11.
-  - `*unpaid @user1`: Chuyển trạng thái về chưa thanh toán (nếu lỡ mark nhầm).
-  - `*unpaid 17/11 @user1`: Chuyển trạng thái về chưa thanh toán của buổi 17/11.
+  - `*unpaid 1` (hoặc `*unpaid CL1`, `*unpaid 17/11`): Lọc danh sách và nhắc nhở theo mã hoá đơn hoặc ngày.
+  - `*unpaid 1 @user1`: Chuyển trạng thái về chưa thanh toán trên hoá đơn 1.
 - **Phân biệt thanh toán giữa các buổi**:
-  - *Qua chuyển khoản ngân hàng*: Bot tự động tạo và hướng dẫn cú pháp chuyển khoản chuẩn trong mọi hoá đơn và tin nhắn nhắc nhở: `CL <DDMM> <tên>` (Ví dụ: `CL 1711 dai.trinhduc`). Thủ quỹ chỉ cần nhìn nội dung sao kê là biết ngay thanh toán cho buổi nào và của ai.
-  - *Qua tin nhắn Mezon*: Mỗi hoá đơn được lưu kèm `MessageID` riêng biệt (`BillHistory`). Thành viên thả reaction `:checked:` vào tin nhắn chia tiền của buổi nào thì bot sẽ ghi nhận chính xác cho buổi đó, không bao giờ bị ghi đè hay nhầm lẫn.
+  - *Nội dung chuyển khoản ngân hàng*: Bot tự động tạo cú pháp ngắn gọn theo mã hoá đơn: `CL<ID> <tên>` (Ví dụ: `CL1 dai.trinhduc` đối với hoá đơn CL1). Rất ngắn, dễ copy và thủ quỹ nhìn sao kê là nhận diện được ngay.
+  - *Phân biệt theo tin nhắn Mezon*: Mỗi hoá đơn lưu `MessageID` riêng biệt (`BillHistory`). Thả reaction vào tin nhắn của hoá đơn nào thì bot ghi nhận chính xác cho hoá đơn đó.
 - `*bxh [tháng]` (hoặc `*stats`): Xem bảng xếp hạng tháng (ví dụ: `*bxh`, `*bxh 11/2026`). Thống kê tổng số buổi, Top "Chăm chỉ" trao danh hiệu `👑 Chiến thần quật cầu`, và Top "Chúa sủi" trao danh hiệu `🍗 Chúa sủi của tháng`. Bot cũng tự động cron chạy vào 20:00 ngày cuối tháng để thông báo vào kênh.
 - `*money qr <link_qr>` (hoặc `*register qr <link_qr>`): Cập nhật mã QR thanh toán mới.
 - `*help`: Hiển thị bảng hướng dẫn lệnh.

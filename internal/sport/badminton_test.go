@@ -814,3 +814,95 @@ func TestBillHistoryAndMultiSessionDistinction(t *testing.T) {
 		t.Errorf("expected dai.trinhduc marked unpaid via reaction removal")
 	}
 }
+
+func TestBillIDGenerationAndCustomTagSplit(t *testing.T) {
+	sender := &mockSender{}
+	mgr := NewManager(Config{
+		Enabled:   true,
+		ChannelID: "sport-chan",
+		StatePath: t.TempDir() + "/badminton.json",
+	}, sender)
+
+	// 1. Create a bill with custom tagged participants directly (no prior check-in)
+	customParticipants := []Participant{
+		{UserID: "u1", Username: "dai.trinhduc", Slots: 2},
+		{UserID: "u2", Username: "nam.nguyen", Slots: 1},
+		{UserID: "u3", Username: "viet.le", Slots: 1},
+	}
+
+	bill1, breakdown1, err := mgr.CreateSplitBill("360k + 26*9", customParticipants...)
+	if err != nil {
+		t.Fatalf("CreateSplitBill with custom participants failed: %v", err)
+	}
+
+	// Total fee = 360k + 234k = 594,000 VND
+	if breakdown1.TotalFee != 594000 {
+		t.Errorf("expected total fee 594k, got %d", breakdown1.TotalFee)
+	}
+	// Slots = 4. 594,000 / 4 = 148,500 -> round up to 149,000 VND / slot
+	if bill1.SlotPrice != 149000 {
+		t.Errorf("expected slot price 149k, got %d", bill1.SlotPrice)
+	}
+	if bill1.BillNumber != 1 || bill1.ID != "1" || bill1.BillCode != "CL1" {
+		t.Errorf("expected bill 1 (CL1), got num=%d id=%s code=%s", bill1.BillNumber, bill1.ID, bill1.BillCode)
+	}
+	if bill1.Items["u1"].Amount != 298000 {
+		t.Errorf("expected u1 amount 298k, got %d", bill1.Items["u1"].Amount)
+	}
+
+	// 2. Create second bill using *money with custom participants
+	bill2, err := mgr.CreateMoneyBill(45000, customParticipants[:2]...)
+	if err != nil {
+		t.Fatalf("CreateMoneyBill 2 failed: %v", err)
+	}
+
+	if bill2.BillNumber != 2 || bill2.ID != "2" || bill2.BillCode != "CL2" {
+		t.Errorf("expected bill 2 (CL2), got num=%d id=%s code=%s", bill2.BillNumber, bill2.ID, bill2.BillCode)
+	}
+
+	// 3. Test findBillLocked with ID variations
+	// Find bill 1 by ID "1"
+	b1ByID, _, _, _, _, err := mgr.GetBillStatus("1")
+	if err != nil || b1ByID.BillNumber != 1 {
+		t.Errorf("expected to find bill 1 by ID '1', got %v", b1ByID)
+	}
+
+	// Find bill 1 by Code "CL1"
+	b1ByCode, _, _, _, _, err := mgr.GetBillStatus("CL1")
+	if err != nil || b1ByCode.BillNumber != 1 {
+		t.Errorf("expected to find bill 1 by Code 'CL1', got %v", b1ByCode)
+	}
+
+	// Find bill 1 by "#1"
+	b1ByHash, _, _, _, _, err := mgr.GetBillStatus("#1")
+	if err != nil || b1ByHash.BillNumber != 1 {
+		t.Errorf("expected to find bill 1 by Hash '#1', got %v", b1ByHash)
+	}
+
+	// Find bill 2 by ID "2"
+	b2ByID, _, _, _, _, err := mgr.GetBillStatus("2")
+	if err != nil || b2ByID.BillNumber != 2 {
+		t.Errorf("expected to find bill 2 by ID '2', got %v", b2ByID)
+	}
+
+	// Find bill 2 by Code "cl2" (case-insensitive)
+	b2ByCode, _, _, _, _, err := mgr.GetBillStatus("cl2")
+	if err != nil || b2ByCode.BillNumber != 2 {
+		t.Errorf("expected to find bill 2 by Code 'cl2', got %v", b2ByCode)
+	}
+
+	// 4. Test MarkPaidBatch with Bill ID
+	paidItems, notFound, totalPaid, _, _, _, err := mgr.MarkPaidBatch([]string{"@dai.trinhduc"}, "1")
+	if err != nil || len(paidItems) != 1 || len(notFound) > 0 {
+		t.Fatalf("failed to mark paid on bill 1 using ID '1'")
+	}
+	if totalPaid != 298000 {
+		t.Errorf("expected totalPaid 298k on bill 1, got %d", totalPaid)
+	}
+
+	// Verify bill 2 still has dai.trinhduc unpaid
+	_, b2Paid, b2Unpaid, _, _, _ := mgr.GetBillStatus("2")
+	if len(b2Paid) != 0 || len(b2Unpaid) != 2 {
+		t.Errorf("expected bill 2 to remain completely unpaid, got paid=%d unpaid=%d", len(b2Paid), len(b2Unpaid))
+	}
+}
