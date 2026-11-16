@@ -35,20 +35,26 @@ type Config struct {
 	SportTru1EmojiID  string
 	SportCheckEmojiID string
 	FundReader       fund.BalanceReader
+	FundIndexer      *fund.Indexer
+	FundWallet       string
+	Wallets          *fund.UserWalletMap
 	Timezone         *time.Location
 	Log              *slog.Logger
 }
 
 // Bot wraps the Mezon client and provides thread-aware message delivery.
 type Bot struct {
-	client     *mezon.MezonClient
-	cfg        Config
-	mu         sync.RWMutex
-	threadID   string
-	channelID  string
-	fundReader fund.BalanceReader
-	sportMgr   *sport.Manager
-	vinhHubMgr *vinhhub.Manager
+	client      *mezon.MezonClient
+	cfg         Config
+	mu          sync.RWMutex
+	threadID    string
+	channelID   string
+	fundReader  fund.BalanceReader
+	fundIndexer *fund.Indexer
+	fundWallet  string
+	wallets     *fund.UserWalletMap
+	sportMgr    *sport.Manager
+	vinhHubMgr  *vinhhub.Manager
 }
 
 // New creates and initializes a Mezon bot instance.
@@ -83,11 +89,14 @@ func New(cfg Config) (*Bot, error) {
 	}
 
 	b := &Bot{
-		client:     c,
-		cfg:        cfg,
-		threadID:   cfg.DefaultThreadID,
-		channelID:  cfg.DefaultChannelID,
-		fundReader: cfg.FundReader,
+		client:      c,
+		cfg:         cfg,
+		threadID:    cfg.DefaultThreadID,
+		channelID:   cfg.DefaultChannelID,
+		fundReader:  cfg.FundReader,
+		fundIndexer: cfg.FundIndexer,
+		fundWallet:  cfg.FundWallet,
+		wallets:     cfg.Wallets,
 	}
 
 	c.OnReady(func() {
@@ -520,6 +529,12 @@ func (b *Bot) handleMessage(m *mezon.ChannelMessage) {
 	switch {
 	case cmd == "*quy" || cmd == "*fund" || cmd == "/quy" || cmd == "!quy":
 		b.handleFundCommand(m)
+	case cmd == "*history" || cmd == "!history" || cmd == "/history":
+		b.handleHistoryCommand(m)
+	case cmd == "*ranking" || strings.HasPrefix(cmd, "*ranking ") ||
+		cmd == "!ranking" || strings.HasPrefix(cmd, "!ranking ") ||
+		cmd == "/ranking" || strings.HasPrefix(cmd, "/ranking "):
+		b.handleRankingCommand(m, text)
 	case cmd == "*help" || cmd == "/help" || cmd == "!help":
 		b.handleHelpCommand(m)
 	case cmd == "*vinhhub" || cmd == "!vinhhub" || cmd == "/vinhhub":
@@ -702,6 +717,137 @@ func (b *Bot) handleFundCommand(m *mezon.ChannelMessage) {
 
 	report := FormatBalanceReport(bal, b.cfg.Timezone)
 	_ = b.reply(m, report)
+}
+
+func (b *Bot) handleHistoryCommand(m *mezon.ChannelMessage) {
+	b.mu.RLock()
+	indexer := b.fundIndexer
+	wallet := b.fundWallet
+	wallets := b.wallets
+	fReader := b.fundReader
+	tz := b.cfg.Timezone
+	b.mu.RUnlock()
+
+	if indexer == nil || wallet == "" {
+		_ = b.reply(m, "Tính năng tra cứu lịch sử quỹ chưa được cấu hình (thiếu API Indexer hoặc địa chỉ quỹ).")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	txs, err := indexer.RecentTransactions(ctx, wallet, 5)
+	if err != nil {
+		b.logger().Error("failed to fetch recent transactions", "err", err)
+		_ = b.reply(m, fmt.Sprintf("⚠️ Không thể lấy lịch sử giao dịch từ Indexer: %v", err))
+		return
+	}
+
+	var curBal *int64
+	if fReader != nil {
+		if bal, err := fReader.Balance(ctx); err == nil {
+			curBal = &bal.BalanceVND
+		}
+	}
+
+	decimals := indexer.Decimals
+	if decimals <= 0 {
+		decimals = 6
+	}
+
+	text := fund.FormatRecentHistory(txs, wallet, wallets, decimals, tz, curBal)
+	_ = b.reply(m, text)
+}
+
+func parseMonthYear(arg string, now time.Time) (int, int, error) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return int(now.Month()), now.Year(), nil
+	}
+
+	clean := strings.ReplaceAll(arg, "-", "/")
+	clean = strings.ReplaceAll(clean, ".", "/")
+	parts := strings.Split(clean, "/")
+
+	if len(parts) == 1 {
+		m, err := strconv.Atoi(parts[0])
+		if err != nil || m < 1 || m > 12 {
+			return 0, 0, fmt.Errorf("tháng không hợp lệ: %s (vui lòng nhập 1-12 hoặc MM/YYYY)", arg)
+		}
+		return m, now.Year(), nil
+	}
+
+	if len(parts) == 2 {
+		m, err1 := strconv.Atoi(parts[0])
+		y, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil || m < 1 || m > 12 {
+			return 0, 0, fmt.Errorf("tháng/năm không hợp lệ: %s (vui lòng nhập MM/YYYY, ví dụ: 11/2026)", arg)
+		}
+		if y < 100 {
+			y += 2000
+		}
+		if y < 2000 || y > 2100 {
+			return 0, 0, fmt.Errorf("năm không hợp lệ: %d", y)
+		}
+		return m, y, nil
+	}
+
+	return 0, 0, fmt.Errorf("định dạng không hợp lệ: %s (vui lòng nhập MM/YYYY, ví dụ: 11/2026)", arg)
+}
+
+func (b *Bot) handleRankingCommand(m *mezon.ChannelMessage, rawText string) {
+	b.mu.RLock()
+	indexer := b.fundIndexer
+	wallet := b.fundWallet
+	wallets := b.wallets
+	tz := b.cfg.Timezone
+	b.mu.RUnlock()
+
+	if indexer == nil || wallet == "" {
+		_ = b.reply(m, "Tính năng bảng xếp hạng chi tiêu chưa được cấu hình (thiếu API Indexer hoặc địa chỉ quỹ).")
+		return
+	}
+
+	cleanText := strings.TrimSpace(rawText)
+	parts := strings.Fields(cleanText)
+	arg := ""
+	if len(parts) > 1 {
+		arg = parts[1]
+	}
+
+	now := time.Now()
+	if tz != nil {
+		now = now.In(tz)
+	}
+
+	month, year, err := parseMonthYear(arg, now)
+	if err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	txs, err := indexer.MonthlyTransactions(ctx, wallet, year, month)
+	if err != nil {
+		b.logger().Error("failed to fetch monthly transactions", "err", err, "month", month, "year", year)
+		_ = b.reply(m, fmt.Sprintf("⚠️ Không thể lấy dữ liệu chi tiêu tháng %02d/%04d: %v", month, year, err))
+		return
+	}
+
+	decimals := indexer.Decimals
+	if decimals <= 0 {
+		decimals = 6
+	}
+
+	rankingReport, err := fund.GenerateMonthlyRanking(txs, wallet, wallets, decimals, year, month)
+	if err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ Lỗi tạo bảng xếp hạng: %v", err))
+		return
+	}
+
+	_ = b.reply(m, rankingReport)
 }
 
 var (
@@ -1331,7 +1477,9 @@ func (b *Bot) handleRegisterQRCommand(m *mezon.ChannelMessage, rawText string) {
 func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 	help := "🤖 **Mezon Bot Hub**\n\n" +
 		"💰 **Quỹ & Tài chính:**\n" +
-		"• `*quy`: Xem số dư hiện tại của quỹ\n\n" +
+		"• `*quy`: Xem số dư hiện tại của quỹ\n" +
+		"• `*history`: Xem lịch sử 5 biến động gần nhất của quỹ\n" +
+		"• `*ranking [tháng/năm]`: Bảng xếp hạng chi tiêu tại VinhCorner (ví dụ: `*ranking` hoặc `*ranking 11/2026`)\n\n" +
 		"🏪 **VinhHub (Energy Hub):**\n" +
 		"• `*vinhhub`: Xem ảnh menu VinhCorner Energy Hub\n" +
 		"• `*register vinhhub <link>`: Cập nhật ảnh menu mới\n" +

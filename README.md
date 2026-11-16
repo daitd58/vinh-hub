@@ -185,6 +185,8 @@ make run
 
 When the bot is running in your channel or thread:
 - `*quy` or `*fund`: The bot queries the Mezon indexer live and responds with the current fund balance.
+- `*history`: Xem lịch sử 5 biến động giao dịch gần nhất của quỹ trực tiếp trên Mezon (hiển thị thời gian, số tiền `+`/`-`, người gửi/người nhận, nội dung, mã hash giao dịch rút gọn, và số dư hiện tại) mà không cần phải vào blockchain explorer tra cứu.
+- `*ranking [mm/yyyy]` (hoặc `*ranking`): Bảng xếp hạng chi tiêu tại VinhCorner Energy Hub trong tháng (ví dụ: `*ranking`, `*ranking 10/2026`, `*ranking 11/2026`). Thống kê chi tiết thứ hạng có huy chương 🥇🥈🥉, tổng tiền chi tiêu, số lượt mua, tổng số người tham gia, và tổng doanh thu nạp vào quỹ trong tháng.
 - `*vinhhub`: Gửi ảnh menu VinhCorner Energy Hub (tự động tạo chữ ký Mezon CDN socket mới mỗi lần gửi để không bao giờ bị lỗi 403, thay thế hoàn toàn bot KOMU).
 - `*register vinhhub <link_image>`: Cập nhật hoặc đổi link ảnh menu mới (lưu vào `vinhhub_state.json`).
 - `*delete vinhhub`: Xoá ảnh tuỳ chỉnh và khôi phục ảnh menu mặc định.

@@ -127,3 +127,41 @@ func TestParseCommandTagsAndExpr(t *testing.T) {
 		t.Errorf("unexpected participants: %v", part5)
 	}
 }
+
+func TestParseMonthYear(t *testing.T) {
+	refTime := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		input     string
+		wantMonth int
+		wantYear  int
+		wantErr   bool
+	}{
+		{"", 11, 2026, false},
+		{"11/2026", 11, 2026, false},
+		{"10/2026", 10, 2026, false},
+		{"10-2026", 10, 2026, false},
+		{"10.2026", 10, 2026, false},
+		{"10/26", 10, 2026, false},
+		{"10", 10, 2026, false},
+		{"1", 1, 2026, false},
+		{"12", 12, 2026, false},
+		{"0", 0, 0, true},
+		{"13", 0, 0, true},
+		{"13/2026", 0, 0, true},
+		{"invalid", 0, 0, true},
+		{"11/12/2026", 0, 0, true},
+	}
+
+	for _, tc := range tests {
+		m, y, err := parseMonthYear(tc.input, refTime)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("parseMonthYear(%q) err = %v, wantErr = %v", tc.input, err, tc.wantErr)
+		}
+		if !tc.wantErr {
+			if m != tc.wantMonth || y != tc.wantYear {
+				t.Errorf("parseMonthYear(%q) = (%d, %d), want (%d, %d)", tc.input, m, y, tc.wantMonth, tc.wantYear)
+			}
+		}
+	}
+}

@@ -68,6 +68,7 @@ func main() {
 
 	// Initialize fund balance reader with primary node source and indexer fallback
 	var fundReader *fund.Reader
+	var fundIndexer *fund.Indexer
 	if cfg.Fund.Wallet != "" {
 		var src fund.Source
 		var nodeSrc *fund.NodeSource
@@ -78,7 +79,8 @@ func main() {
 			defer nodeSrc.Close()
 		}
 		if cfg.Fund.ApiURL != "" {
-			indexerSrc = fund.NewIndexer(cfg.Fund.ApiURL, cfg.Fund.ChainID, cfg.Fund.Decimals, nil)
+			fundIndexer = fund.NewIndexer(cfg.Fund.ApiURL, cfg.Fund.ChainID, cfg.Fund.Decimals, nil)
+			indexerSrc = fundIndexer
 		}
 
 		if nodeSrc != nil && indexerSrc != nil {
@@ -133,6 +135,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	wallets, err := fund.LoadUserWalletMap(cfg.Fund.WalletsPath)
+	if err != nil {
+		logger.Warn("could not load user wallet mapping file; using defaults", "err", err)
+		wallets = fund.DefaultWallets
+	} else {
+		logger.Info("loaded user wallet map", "count", len(wallets.All()))
+	}
+
 	// Initialize Mezon bot
 	mezonBot, err := bot.New(bot.Config{
 		BotID:            cfg.Mezon.BotID,
@@ -149,6 +159,9 @@ func main() {
 		SportTru1EmojiID:  cfg.Sport.Tru1EmojiID,
 		SportCheckEmojiID: cfg.Sport.CheckEmojiID,
 		FundReader:       fundReader,
+		FundIndexer:      fundIndexer,
+		FundWallet:       cfg.Fund.Wallet,
+		Wallets:          wallets,
 		Timezone:         cfg.Fund.Timezone,
 		Log:              logger,
 	})
@@ -232,13 +245,6 @@ func main() {
 		destDesc := cfg.Mezon.ThreadID
 		if destDesc == "" {
 			destDesc = cfg.Mezon.ChannelID
-		}
-		wallets, err := fund.LoadUserWalletMap(cfg.Fund.WalletsPath)
-		if err != nil {
-			logger.Warn("could not load user wallet mapping file; using defaults", "err", err)
-			wallets = fund.DefaultWallets
-		} else {
-			logger.Info("loaded user wallet map", "count", len(wallets.All()))
 		}
 
 		// Initialize Bot Intermediary Forwarder:
