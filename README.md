@@ -196,7 +196,7 @@ When the bot is running in your channel or thread:
 - `*paid [@user...]`:
   - `*paid @user1 @user2`: Đánh dấu thành viên đã thanh toán.
   - `*paid` (không tham số): Hiển thị dashboard tiến độ thu tiền (ai đã đóng, ai chưa đóng, tổng đã thu / còn thiếu).
-  - *Mẹo*: Thành viên có thể react `✅`, `💵`, `👍` trực tiếp vào tin nhắn chia tiền để bot tự động ghi nhận đã đóng tiền!
+  - *Mẹo*: Thành viên có thể react `:checked:`, `:check:` (custom emoji trong clan KOMU) hoặc `✅`, `💵`, `👍` trực tiếp vào tin nhắn chia tiền để bot tự động ghi nhận đã đóng tiền! Bot cũng tự động thả sẵn reaction `:checked:` để mọi người bấm 1 chạm.
 - `*unpaid [@user...]`:
   - `*unpaid @user1`: Chuyển trạng thái về chưa thanh toán (nếu lỡ mark nhầm).
   - `*unpaid` (không tham số): Lọc danh sách những người chưa đóng tiền, tag trực tiếp để nhắc nhở và đính kèm mã QR thanh toán.

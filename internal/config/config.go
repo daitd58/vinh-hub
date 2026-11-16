@@ -43,6 +43,7 @@ type SportConfig struct {
 	GeminiKey     string
 	Cong1EmojiID  string
 	Tru1EmojiID   string
+	CheckEmojiID  string
 	PaymentQR     string
 }
 
@@ -144,6 +145,7 @@ func Load() *Config {
 	cfg.Sport.GeminiKey = strings.TrimSpace(env("GEMINI_API_KEY", ""))
 	cfg.Sport.Cong1EmojiID = strings.TrimSpace(env("SPORT_CONG1_EMOJI_ID", "7239659508431615752"))
 	cfg.Sport.Tru1EmojiID = strings.TrimSpace(env("SPORT_TRU1_EMOJI_ID", "7294564276005201529"))
+	cfg.Sport.CheckEmojiID = strings.TrimSpace(env("SPORT_CHECK_EMOJI_ID", "7237751213104827794"))
 	cfg.Sport.PaymentQR = strings.TrimSpace(env("SPORT_PAYMENT_QR", "https://cdn.mezon.ai/198b7117db001000/2122180489040105472_pasted_image_1794802215552_0.png?1794803450-2Zo8db8MRVnVm9qwMzSilZzXa2%2F1v2WP%2FSKoY6TpJHI%3D"))
 
 	// VinhHub (Energy Hub)

@@ -147,6 +147,7 @@ func main() {
 		SportChannelID:   cfg.Sport.ChannelID,
 		SportCong1EmojiID: cfg.Sport.Cong1EmojiID,
 		SportTru1EmojiID:  cfg.Sport.Tru1EmojiID,
+		SportCheckEmojiID: cfg.Sport.CheckEmojiID,
 		FundReader:       fundReader,
 		Timezone:         cfg.Fund.Timezone,
 		Log:              logger,

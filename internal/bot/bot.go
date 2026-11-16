@@ -33,6 +33,7 @@ type Config struct {
 	SportChannelID   string
 	SportCong1EmojiID string
 	SportTru1EmojiID  string
+	SportCheckEmojiID string
 	FundReader       fund.BalanceReader
 	Timezone         *time.Location
 	Log              *slog.Logger
@@ -306,6 +307,12 @@ func (b *Bot) ReactToMessage(ctx context.Context, channelID, messageID, emoji st
 			emojiID = "7294564276005201529"
 		}
 		emoji = ":tru1:"
+	} else if strings.Contains(cleanEmoji, "check") || cleanEmoji == "done" {
+		emojiID = b.cfg.SportCheckEmojiID
+		if emojiID == "" {
+			emojiID = "7237751213104827794"
+		}
+		emoji = ":checked:"
 	}
 
 	data := mezon.ReactMessageData{
@@ -332,6 +339,7 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 	botID := b.cfg.BotID
 	cong1ID := b.cfg.SportCong1EmojiID
 	tru1ID := b.cfg.SportTru1EmojiID
+	checkID := b.cfg.SportCheckEmojiID
 	b.mu.RUnlock()
 
 	if sportMgr == nil {
@@ -366,23 +374,27 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 			emojiVal = ":cong1:"
 		} else if emojiIDStr == tru1ID || ev.EmojiId == 7294564276005201529 {
 			emojiVal = ":tru1:"
+		} else if emojiIDStr == checkID || ev.EmojiId == 7237751213104827794 || ev.EmojiId == 7232028638063261029 {
+			emojiVal = ":checked:"
 		}
 	}
 
 	// Check if this reaction is on the active split/money bill message
 	if sportMgr.IsCurrentBillMessage(msgID) {
 		cleanEmoji := strings.ToLower(strings.Trim(emojiVal, ":"))
-		isPaidEmoji := cleanEmoji == "white_check_mark" || cleanEmoji == "check" || cleanEmoji == "✅" ||
+		isPaidEmoji := strings.Contains(cleanEmoji, "check") || strings.Contains(cleanEmoji, "done") ||
+			cleanEmoji == "white_check_mark" || cleanEmoji == "✅" ||
 			cleanEmoji == "heavy_check_mark" || cleanEmoji == "✔" || cleanEmoji == "ballot_box_with_check" || cleanEmoji == "☑" ||
-			cleanEmoji == "💵" || cleanEmoji == "👍" || cleanEmoji == "+1" || cleanEmoji == "moneybag" || cleanEmoji == "money_with_wings" || cleanEmoji == "ok_hand" || cleanEmoji == "👌"
+			cleanEmoji == "💵" || cleanEmoji == "👍" || cleanEmoji == "+1" || cleanEmoji == "moneybag" || cleanEmoji == "money_with_wings" || cleanEmoji == "ok_hand" || cleanEmoji == "👌" ||
+			cleanEmoji == "7237751213104827794" || cleanEmoji == "7232028638063261029"
 		if isPaidEmoji {
 			if !ev.Action {
 				if item, ok := sportMgr.MarkPaidByUserIDOrName(senderID, senderName); ok {
-					b.logger().Info("marked user as paid via reaction", "user", item.Username, "msg_id", msgID)
+					b.logger().Info("marked user as paid via reaction", "user", item.Username, "emoji", emojiVal, "msg_id", msgID)
 				}
 			} else {
 				if _, _, err := sportMgr.MarkUnpaidBatch([]string{senderName}); err == nil {
-					b.logger().Info("unmarked user paid via reaction removal", "user", senderName, "msg_id", msgID)
+					b.logger().Info("unmarked user paid via reaction removal", "user", senderName, "emoji", emojiVal, "msg_id", msgID)
 				}
 			}
 			return
@@ -758,7 +770,7 @@ func (b *Bot) handleSplitCommand(m *mezon.ChannelMessage, rawText string) {
 		})
 	}
 
-	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React ✅ vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
+	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React :checked: hoặc :check: vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
 
 	qrURL := sportMgr.GetPaymentQR()
 	signedQRURL := qrURL
@@ -791,6 +803,7 @@ func (b *Bot) handleSplitCommand(m *mezon.ChannelMessage, rawText string) {
 	}
 	if sentMsgID != "" {
 		sportMgr.SetCurrentBillMessageID(sentMsgID)
+		_ = b.ReactToMessage(context.Background(), m.ChannelID, sentMsgID, ":checked:")
 	}
 }
 
@@ -862,7 +875,7 @@ func (b *Bot) handleMoneyCommand(m *mezon.ChannelMessage, rawText string) {
 		})
 	}
 
-	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React ✅ vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
+	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React :checked: hoặc :check: vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
 
 	qrURL := sportMgr.GetPaymentQR()
 	signedQRURL := qrURL
@@ -896,6 +909,7 @@ func (b *Bot) handleMoneyCommand(m *mezon.ChannelMessage, rawText string) {
 	}
 	if sentMsgID != "" {
 		sportMgr.SetCurrentBillMessageID(sentMsgID)
+		_ = b.ReactToMessage(context.Background(), m.ChannelID, sentMsgID, ":checked:")
 	}
 }
 
