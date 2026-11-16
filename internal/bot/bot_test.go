@@ -32,3 +32,20 @@ func TestBotInitValidation(t *testing.T) {
 		t.Error("expected error without token")
 	}
 }
+
+func TestParseMarkdownSpans(t *testing.T) {
+	text := "Chào **Vinh-CL**! Hẹn gặp lúc **19:00**."
+	clean, spans := ParseMarkdownSpans(text)
+
+	wantClean := "Chào Vinh-CL! Hẹn gặp lúc 19:00."
+	if clean != wantClean {
+		t.Errorf("clean = %q, want %q", clean, wantClean)
+	}
+
+	if len(spans) != 2 {
+		t.Fatalf("expected 2 spans, got %d", len(spans))
+	}
+	if spans[0]["type"] != "b" || spans[1]["type"] != "b" {
+		t.Errorf("spans type not 'b'")
+	}
+}

@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/joho/godotenv v1.5.1
 	github.com/mezonai/mmn-sdk/go-sdk v1.1.0
-	github.com/quangledang23/mezon-sdk-go v0.2.6
+	github.com/quangledang23/mezon-sdk-go v0.3.0
 )
 
 require (

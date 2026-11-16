@@ -185,6 +185,9 @@ make run
 
 When the bot is running in your channel or thread:
 - `*quy` or `*fund`: The bot queries the Mezon indexer live and responds with the current fund balance.
+- `*vinhhub`: Gửi ảnh menu VinhCorner Energy Hub (tự động tạo chữ ký Mezon CDN socket mới mỗi lần gửi để không bao giờ bị lỗi 403, thay thế hoàn toàn bot KOMU).
+- `*register vinhhub <link_image>`: Cập nhật hoặc đổi link ảnh menu mới (lưu vào `vinhhub_state.json`).
+- `*delete vinhhub`: Xoá ảnh tuỳ chỉnh và khôi phục ảnh menu mặc định.
 - `*diemdanh` (hoặc `*vinhhub diemdanh`): Kích hoạt ngay thông báo điểm danh cho buổi đánh tiếp theo (ping role `@Vinh-CL`).
 - `*nhaclich`: Gửi ngay tin nhắn nhắc lịch kèm AI tóm tắt danh sách tham gia, vắng mặt, và sân bãi.
 - `*summary`: Xem nhanh tình hình điểm danh hiện tại mà không cần đợi cron.

@@ -15,6 +15,7 @@ import (
 
 	"vinh-hub/internal/fund"
 	"vinh-hub/internal/sport"
+	"vinh-hub/internal/vinhhub"
 )
 
 // Config configures the Mezon bot.
@@ -45,6 +46,7 @@ type Bot struct {
 	channelID  string
 	fundReader fund.BalanceReader
 	sportMgr   *sport.Manager
+	vinhHubMgr *vinhhub.Manager
 }
 
 // New creates and initializes a Mezon bot instance.
@@ -182,6 +184,18 @@ func (b *Bot) SetSportManager(mgr *sport.Manager) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.sportMgr = mgr
+}
+
+// SetVinhHubManager attaches the VinhHub manager and sets up the socket CDN signer.
+func (b *Bot) SetVinhHubManager(mgr *vinhhub.Manager) {
+	b.mu.Lock()
+	b.vinhHubMgr = mgr
+	b.mu.Unlock()
+	if mgr != nil {
+		mgr.SetSigner(func(rawURL string) (string, error) {
+			return vinhhub.SignCDNURL(b.client, rawURL)
+		})
+	}
 }
 
 // SendToChannel sends a message with optional mentions directly to a channel,
@@ -475,6 +489,14 @@ func (b *Bot) handleMessage(m *mezon.ChannelMessage) {
 		b.handleFundCommand(m)
 	case cmd == "*help" || cmd == "/help" || cmd == "!help":
 		b.handleHelpCommand(m)
+	case cmd == "*vinhhub" || cmd == "!vinhhub" || cmd == "/vinhhub":
+		b.handleVinhHubCommand(m)
+	case strings.HasPrefix(cmd, "*register vinhhub") || strings.HasPrefix(cmd, "!register vinhhub") || strings.HasPrefix(cmd, "/register vinhhub") ||
+		strings.HasPrefix(cmd, "*vinhhub register") || strings.HasPrefix(cmd, "!vinhhub register") || strings.HasPrefix(cmd, "/vinhhub register"):
+		b.handleRegisterVinhHubCommand(m, text)
+	case cmd == "*delete vinhhub" || cmd == "!delete vinhhub" || cmd == "/delete vinhhub" ||
+		cmd == "*vinhhub delete" || cmd == "!vinhhub delete" || cmd == "/vinhhub delete":
+		b.handleDeleteVinhHubCommand(m)
 	case cmd == "*diemdanh" || cmd == "*vinhhub diemdanh" || strings.HasPrefix(cmd, "*diemdanh"):
 		b.handleDiemDanhCommand(m)
 	case cmd == "*nhaclich" || cmd == "*vinhhub nhaclich":
@@ -482,6 +504,92 @@ func (b *Bot) handleMessage(m *mezon.ChannelMessage) {
 	case cmd == "*summary" || cmd == "*vinhhub summary":
 		b.handleSummaryCommand(m)
 	}
+}
+
+func (b *Bot) handleVinhHubCommand(m *mezon.ChannelMessage) {
+	b.mu.RLock()
+	vinhHubMgr := b.vinhHubMgr
+	b.mu.RUnlock()
+
+	if vinhHubMgr == nil {
+		_ = b.reply(m, "Tính năng VinhHub chưa được cấu hình.")
+		return
+	}
+
+	imgURL, err := vinhHubMgr.GetImageURL()
+	if err != nil {
+		b.logger().Error("failed to get vinhhub image URL", "err", err)
+		_ = b.reply(m, fmt.Sprintf("⚠️ Không thể tải ảnh VinhHub: %v", err))
+		return
+	}
+
+	filename := vinhhub.FileNameFromURL(imgURL)
+	opts := &mezon.SendOptions{
+		Attachments: []mezon.Attachment{
+			{
+				Filename: filename,
+				Filetype: "image",
+				URL:      imgURL,
+			},
+		},
+	}
+
+	if err := b.replyWithOptions(m, "", opts); err != nil {
+		b.logger().Error("failed to send vinhhub image", "err", err, "url", imgURL)
+		_ = b.reply(m, fmt.Sprintf("⚠️ Gửi ảnh VinhHub thất bại: %v", err))
+	}
+}
+
+func (b *Bot) handleRegisterVinhHubCommand(m *mezon.ChannelMessage, rawText string) {
+	b.mu.RLock()
+	vinhHubMgr := b.vinhHubMgr
+	b.mu.RUnlock()
+
+	if vinhHubMgr == nil {
+		_ = b.reply(m, "Tính năng VinhHub chưa được cấu hình.")
+		return
+	}
+
+	parts := strings.Fields(rawText)
+	var urlToRegister string
+	if len(parts) >= 3 {
+		urlToRegister = parts[2]
+	}
+
+	if urlToRegister == "" {
+		_ = b.reply(m, "⚠️ Vui lòng cung cấp link ảnh: `*register vinhhub <link_ảnh>`")
+		return
+	}
+
+	sender := m.Username
+	if sender == "" {
+		sender = m.SenderID
+	}
+
+	if err := vinhHubMgr.Register(urlToRegister, sender); err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+		return
+	}
+
+	_ = b.reply(m, fmt.Sprintf("✅ Đã cập nhật ảnh VinhHub thành công!\nLink ảnh: %s", urlToRegister))
+}
+
+func (b *Bot) handleDeleteVinhHubCommand(m *mezon.ChannelMessage) {
+	b.mu.RLock()
+	vinhHubMgr := b.vinhHubMgr
+	b.mu.RUnlock()
+
+	if vinhHubMgr == nil {
+		_ = b.reply(m, "Tính năng VinhHub chưa được cấu hình.")
+		return
+	}
+
+	if err := vinhHubMgr.Delete(); err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ Xoá cấu hình ảnh VinhHub thất bại: %v", err))
+		return
+	}
+
+	_ = b.reply(m, "✅ Đã xoá ảnh tuỳ chỉnh và khôi phục ảnh menu VinhHub mặc định!")
 }
 
 func (b *Bot) handleDiemDanhCommand(m *mezon.ChannelMessage) {
@@ -550,6 +658,10 @@ func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 	help := "🤖 **Mezon Bot Hub**\n\n" +
 		"💰 **Quỹ & Tài chính:**\n" +
 		"• `*quy`: Xem số dư hiện tại của quỹ\n\n" +
+		"🏪 **VinhHub (Energy Hub):**\n" +
+		"• `*vinhhub`: Xem ảnh menu VinhCorner Energy Hub\n" +
+		"• `*register vinhhub <link>`: Cập nhật ảnh menu mới\n" +
+		"• `*delete vinhhub`: Khôi phục ảnh menu mặc định\n\n" +
 		"🏸 **Cầu lông & Thể thao:**\n" +
 		"• `*diemdanh`: Gửi thông báo điểm danh cho buổi đánh cầu tiếp theo\n" +
 		"• `*nhaclich`: Nhắc lịch trước giờ đánh & AI tóm tắt ai đi ai nghỉ, sân nào\n" +
@@ -592,37 +704,35 @@ func ParseMarkdownSpans(text string) (string, []map[string]any) {
 	return clean.String(), spans
 }
 
-func (b *Bot) reply(m *mezon.ChannelMessage, text string) error {
-	cleanText, mk := ParseMarkdownSpans(text)
-	var content any
-	if len(mk) > 0 {
-		content = map[string]any{
-			"t":  cleanText,
-			"mk": mk,
-		}
-	} else {
-		content = mezon.Text(cleanText)
+func (b *Bot) replyWithOptions(m *mezon.ChannelMessage, text string, opts *mezon.SendOptions) error {
+	if opts == nil {
+		opts = &mezon.SendOptions{}
 	}
-
-	channelID := m.ChannelID
-	topicID := m.TopicID
-
-	// Reply to same thread or channel
-	if topicID != "" {
-		return b.SendToThread(context.Background(), channelID, topicID, cleanText)
+	if opts.TopicID == "" && m.TopicID != "" {
+		opts.TopicID = m.TopicID
 	}
-
-	ch, err := b.client.Channels.Fetch(channelID)
-	if err != nil {
-		return err
-	}
-	_, err = ch.Send(content, &mezon.SendOptions{
-		References: []mezon.MessageRef{{
+	if len(opts.References) == 0 && m.ID != "" {
+		opts.References = []mezon.MessageRef{{
 			MessageRefID:    m.ID,
 			MessageSenderID: m.SenderID,
-		}},
-	})
+		}}
+	}
+
+	targetID := m.ChannelID
+	if m.TopicID != "" {
+		targetID = m.TopicID
+	}
+
+	_, err := b.SendToChannel(context.Background(), targetID, text, opts)
+	if err != nil && targetID != m.ChannelID && m.ChannelID != "" {
+		// Fallback to parent channel with TopicID
+		_, err = b.SendToChannel(context.Background(), m.ChannelID, text, opts)
+	}
 	return err
+}
+
+func (b *Bot) reply(m *mezon.ChannelMessage, text string) error {
+	return b.replyWithOptions(m, text, nil)
 }
 
 // FormatBalanceReport formats a balance report for interactive commands.

@@ -17,6 +17,7 @@ import (
 	"vinh-hub/internal/fund"
 	"vinh-hub/internal/outbox"
 	"vinh-hub/internal/sport"
+	"vinh-hub/internal/vinhhub"
 )
 
 // outboxAdapter adapts outbox.Outbox to fund.Queue.
@@ -218,6 +219,11 @@ func main() {
 		logger.Info("badminton manager initialized and running",
 			"channel_id", cfg.Sport.ChannelID, "role", cfg.Sport.RoleName)
 	}
+
+	// Initialize VinhHub (Energy Hub) Manager
+	vinhHubMgr := vinhhub.NewManager(cfg.VinhHub.DefaultImage, cfg.VinhHub.StatePath, logger)
+	mezonBot.SetVinhHubManager(vinhHubMgr)
+	logger.Info("vinhhub manager initialized", "default_image", cfg.VinhHub.DefaultImage, "state_path", cfg.VinhHub.StatePath)
 
 	// Run Fund Stream
 	if cfg.Fund.NodeEndpoint != "" && cfg.Fund.Wallet != "" {

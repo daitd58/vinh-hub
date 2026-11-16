@@ -17,9 +17,16 @@ type Config struct {
 	App       AppConfig
 	BotWallet BotWalletConfig
 	Sport     SportConfig
+	VinhHub   VinhHubConfig
 
 	DotEnvPath string
 	DotEnvErr  error
+}
+
+// VinhHubConfig holds settings for the VinhHub energy hub menu.
+type VinhHubConfig struct {
+	DefaultImage string
+	StatePath    string
 }
 
 // SportConfig holds settings for badminton attendance and match reminders.
@@ -136,6 +143,10 @@ func Load() *Config {
 	cfg.Sport.GeminiKey = strings.TrimSpace(env("GEMINI_API_KEY", ""))
 	cfg.Sport.Cong1EmojiID = strings.TrimSpace(env("SPORT_CONG1_EMOJI_ID", "7239659508431615752"))
 	cfg.Sport.Tru1EmojiID = strings.TrimSpace(env("SPORT_TRU1_EMOJI_ID", "7294564276005201529"))
+
+	// VinhHub (Energy Hub)
+	cfg.VinhHub.DefaultImage = env("VINHHUB_DEFAULT_IMAGE", "https://cdn.mezon.ai/1994479556801000/2121182274450886656_SG_Energy_Hub_3.png?1794795387-WzdD7%2B%2BoP9%2F%2FyK5Q%2BnpIXfGobTpgQyfZ8sasb74aXCc%3D")
+	cfg.VinhHub.StatePath = env("VINHHUB_STATE_PATH", "vinhhub_state.json")
 
 	// App
 	intervalSec := intEnv("COURIER_INTERVAL", 30)
