@@ -10,6 +10,7 @@ import (
 	"time"
 
 	mezon "github.com/quangledang23/mezon-sdk-go"
+	"github.com/quangledang23/mezon-sdk-go/api"
 
 	"vinh-hub/internal/fund"
 )
@@ -84,6 +85,18 @@ func New(cfg Config) (*Bot, error) {
 
 	c.OnChannelMessage(func(m *mezon.ChannelMessage) {
 		b.handleMessage(m)
+	})
+
+	c.On(mezon.EventTokenSend, func(p any) {
+		if ev, ok := p.(*api.TokenSentEvent); ok {
+			b.logger().Info("mezon token transfer received via websocket",
+				"sender_id", ev.GetSenderId(),
+				"sender_name", ev.GetSenderName(),
+				"amount", ev.GetAmount(),
+				"note", ev.GetNote(),
+				"tx_id", ev.GetTransactionId(),
+			)
+		}
 	})
 
 	return b, nil

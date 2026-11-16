@@ -7,6 +7,7 @@ A real-time Mezon bot that monitors wallet transactions on the **Mezon Đồng**
 - **Live Blockchain Stream**: Connects via gRPC to the Mezon node (`dong.mezon.ai:443`) using [`github.com/mezonai/mmn-sdk/go-sdk`](https://github.com/mezonai/mmn-sdk/go-sdk) to subscribe to real-time transactions (`TxService.SubscribeTransactionStatus`).
 - **Transaction Filtering & Attribution**:
   - Automatically filters incoming and outgoing transactions for the configured fund wallet (`DONATION_WALLET_ADDRESS`).
+  - **Bot Intermediary (Auto-Forward)**: Users can send tokens directly to the bot's wallet (`BOT_WALLET_ADDRESS`); the bot automatically forwards incoming tokens to the fund wallet on-chain and maps the original sender and message.
   - Ignores `HeartBeat` events, unconfirmed/failed transactions, and other unrelated wallets.
   - Resolves sender and recipient wallet addresses to Mezon usernames via [`wallets.json`](file:///Users/daitrinh/Projects/vinh-hub/wallets.json).
   - Displays the transaction content / note (`Nội dung: ...`) when provided.
@@ -35,6 +36,15 @@ Người gửi: dai.trinhduc
 Nội dung: sua chua
 15:22 11/09/2026
 Quỹ hiện có 46.000.000 VNĐ
+```
+
+When money is sent via the bot intermediary (`a.nguyenvan transfer via bot: 1 xúc xích`):
+```text
+Nhận vào quỹ +20.000 VNĐ
+Người gửi: a.nguyenvan (qua bot)
+Nội dung: 1 xúc xích
+15:22 16/11/2026
+Quỹ hiện có 46.020.000 VNĐ
 ```
 
 When money leaves the wallet:
@@ -82,6 +92,8 @@ Settings are loaded from `.env` in the project root:
 | `MEZON_THREAD_ID` | Optional* | Target thread ID to deliver fund posts (*at least one of Channel or Thread ID is required) |
 | `MEZON_THREAD_NAME` | No | Name of thread to create if `MEZON_THREAD_ID` is blank (default: `Biến động quỹ`) |
 | `DONATION_WALLET_ADDRESS`| **Yes** | Fund wallet address to monitor on the blockchain |
+| `BOT_WALLET_ADDRESS`| Optional | Intermediary bot wallet address (users can transfer here) |
+| `BOT_PRIVATE_KEY`   | Optional | Private key or seed (hex or base58) to auto-forward from bot to fund |
 | `MMN_NODE_ENDPOINT` | No | gRPC node endpoint, default `dong.mezon.ai:443` |
 | `MMN_NODE_TLS` | No | Enable TLS for gRPC node, default `true` |
 | `MMN_TOKEN_DECIMALS` | No | Token decimals, default `6` |
@@ -139,3 +151,55 @@ When the bot is running in your channel or thread:
   Cập nhật lúc: 09:53 28/09/2026
   ```
 - Type `*help`: The bot displays help and available commands.
+
+---
+
+## Deploying on Ubuntu (systemd Service)
+
+To run the bot as a background service on Ubuntu that automatically restarts on crashes and system reboots:
+
+### 1. Build Linux Binary
+You can build directly on macOS or CI:
+```bash
+make build-linux
+```
+This produces a standalone, statically linked executable: `bin/fundbot-linux-amd64`.
+
+### 2. Quick Deploy with Script (on Ubuntu Server)
+Clone or copy the repository to the Ubuntu server, then run:
+```bash
+sudo ./deploy/setup.sh
+```
+
+### 3. Manual Deployment Steps
+If you prefer configuring manually:
+
+1. **Copy binary and files to `/opt/fundbot`**:
+   ```bash
+   sudo mkdir -p /opt/fundbot
+   sudo cp bin/fundbot-linux-amd64 /opt/fundbot/fundbot
+   sudo chmod +x /opt/fundbot/fundbot
+   sudo cp wallets.json /opt/fundbot/
+   sudo cp .env /opt/fundbot/.env
+   sudo chmod 600 /opt/fundbot/.env
+   ```
+
+2. **Install systemd unit**:
+   Copy [`deploy/fundbot.service`](file:///Users/daitrinh/Projects/vinh-hub/deploy/fundbot.service) to `/etc/systemd/system/fundbot.service`:
+   ```bash
+   sudo cp deploy/fundbot.service /etc/systemd/system/fundbot.service
+   ```
+
+3. **Enable and start the service**:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable fundbot
+   sudo systemctl start fundbot
+   ```
+
+4. **Useful Service Management Commands**:
+   - Check status: `sudo systemctl status fundbot`
+   - View real-time logs: `journalctl -u fundbot -f`
+   - Restart bot: `sudo systemctl restart fundbot`
+   - Stop bot: `sudo systemctl stop fundbot`
+

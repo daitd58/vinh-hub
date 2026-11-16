@@ -47,3 +47,17 @@ func TestConfigValidation(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestConfigBotWallet(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("BOT_WALLET_ADDRESS", "bot_addr_123")
+	t.Setenv("BOT_PRIVATE_KEY", "bot_priv_key_456")
+
+	cfg := Load()
+	if cfg.BotWallet.Address != "bot_addr_123" {
+		t.Errorf("BotWallet.Address = %s, want bot_addr_123", cfg.BotWallet.Address)
+	}
+	if cfg.BotWallet.PrivateKey != "bot_priv_key_456" {
+		t.Errorf("BotWallet.PrivateKey = %s, want bot_priv_key_456", cfg.BotWallet.PrivateKey)
+	}
+}

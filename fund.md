@@ -71,6 +71,8 @@ production and from `.env` locally.
 | `MMN_NODE_ENDPOINT` | the feed | The mmn node's gRPC address: `dong.mezon.ai:443`. **Use the hostname, not the IP.** The certificate is `*.mezon.ai` and has no IP SANs, so connecting to `103.214.9.101` fails verification. Blank turns the feed off. |
 | `MMN_NODE_TLS` | the feed | `true` by default. Set `false` only for a node served without TLS. |
 | `DONATION_WALLET_ADDRESS` | the feed and the balance | The campaign wallet. Transactions from or to this address are posted. |
+| `BOT_WALLET_ADDRESS` | intermediary | Optional. The bot wallet address users can transfer tokens to. |
+| `BOT_PRIVATE_KEY` | intermediary | Optional. Private key or seed (hex or base58) to sign auto-forwarding txs from bot to fund. |
 | `MEZON_FUND_CHANNEL_ID` | the feed | The channel the posts go to. Blank falls back to `MEZON_ANNOUNCE_CHANNEL_ID`. |
 | `MMN_TOKEN_DECIMALS` | amounts | The token's precision, default `6`. The raw amount is divided by 10^decimals to get whole đồng. |
 | `MEZON_MAINNET_API_URL` | the balance line | The indexer's REST base, `https://dong.mezon.ai/indexer-api`. Blank drops the balance line (and `*quy`). |

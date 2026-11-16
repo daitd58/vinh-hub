@@ -12,12 +12,19 @@ import (
 
 // Config holds all configuration values.
 type Config struct {
-	Fund  FundConfig
-	Mezon MezonConfig
-	App   AppConfig
+	Fund      FundConfig
+	Mezon     MezonConfig
+	App       AppConfig
+	BotWallet BotWalletConfig
 
 	DotEnvPath string
 	DotEnvErr  error
+}
+
+// BotWalletConfig holds settings for the intermediary bot wallet.
+type BotWalletConfig struct {
+	Address    string
+	PrivateKey string
 }
 
 // FundConfig holds settings for blockchain node and fund balance reader.
@@ -94,6 +101,10 @@ func Load() *Config {
 	cfg.Mezon.ChannelID = strings.TrimSpace(chanID)
 	cfg.Mezon.ThreadID = strings.TrimSpace(env("MEZON_THREAD_ID", ""))
 	cfg.Mezon.ThreadName = strings.TrimSpace(env("MEZON_THREAD_NAME", "Biến động quỹ"))
+
+	// Bot Wallet (Intermediary)
+	cfg.BotWallet.Address = strings.TrimSpace(env("BOT_WALLET_ADDRESS", ""))
+	cfg.BotWallet.PrivateKey = strings.TrimSpace(env("BOT_PRIVATE_KEY", ""))
 
 	// App
 	intervalSec := intEnv("COURIER_INTERVAL", 30)

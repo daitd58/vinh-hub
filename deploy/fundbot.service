@@ -1,0 +1,20 @@
+[Unit]
+Description=Mezon Fund Feed Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nccsoft
+WorkingDirectory=/home/nccsoft/projects/vinh-hub
+ExecStart=/home/nccsoft/projects/vinh-hub/bin/fundbot
+Restart=always
+RestartSec=5s
+EnvironmentFile=-/home/nccsoft/projects/vinh-hub/.env
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fundbot
+
+[Install]
+WantedBy=multi-user.target

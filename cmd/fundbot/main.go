@@ -200,17 +200,69 @@ func main() {
 			logger.Info("loaded user wallet map", "count", len(wallets.All()))
 		}
 
+		// Initialize Bot Intermediary Forwarder:
+		// Priority 1: If BOT_PRIVATE_KEY is explicitly configured -> Key mode (TxTypeTransferByKey)
+		// Priority 2: Native Mezon ZK Forwarder (no private key needed, uses bot ID & bot token like mezon-sdk JS)
+		var forwarder *fund.Forwarder
+		botWalletAddr := cfg.BotWallet.Address
+		if cfg.BotWallet.PrivateKey != "" {
+			fwd, err := fund.NewForwarder(
+				cfg.Fund.NodeEndpoint,
+				cfg.Fund.NodeTLS,
+				cfg.Fund.Wallet,
+				cfg.BotWallet.PrivateKey,
+				botWalletAddr,
+				wallets,
+				logger,
+			)
+			if err != nil {
+				logger.Error("failed to initialize key-based bot forwarder", "err", err)
+			} else {
+				forwarder = fwd
+				defer forwarder.Close()
+				botWalletAddr = forwarder.BotAddress()
+				logger.Info("bot forwarder initialized (Key mode)", "bot_wallet", botWalletAddr, "fund_wallet", cfg.Fund.Wallet)
+			}
+		} else if cfg.Mezon.BotID != "" && cfg.Mezon.Token != "" {
+			zkFwd, err := fund.NewZKForwarder(
+				cfg.Fund.NodeEndpoint,
+				cfg.Fund.NodeTLS,
+				"", // default ZK API: https://dong.mezon.ai/zk-api/prove
+				cfg.Mezon.Host,
+				cfg.Mezon.BotID,
+				cfg.Mezon.Token,
+				cfg.Fund.Wallet,
+				botWalletAddr,
+				wallets,
+				logger,
+			)
+			if err != nil {
+				logger.Error("failed to initialize native ZK bot forwarder", "err", err)
+			} else {
+				forwarder = zkFwd
+				defer forwarder.Close()
+				botWalletAddr = forwarder.BotAddress()
+				logger.Info("bot forwarder initialized (Native Mezon ZK mode - no private key required)",
+					"bot_wallet", botWalletAddr, "fund_wallet", cfg.Fund.Wallet)
+			}
+		} else if botWalletAddr != "" {
+			logger.Warn("BOT_WALLET_ADDRESS is set, but auto-forwarding credentials are missing",
+				"bot_wallet", botWalletAddr)
+		}
+
 		stream := &fund.Stream{
-			Endpoint:  cfg.Fund.NodeEndpoint,
-			UseTLS:    cfg.Fund.NodeTLS,
-			Address:   cfg.Fund.Wallet,
-			ChannelID: cfg.Mezon.ChannelID,
-			ThreadID:  cfg.Mezon.ThreadID,
-			Decimals:  cfg.Fund.Decimals,
-			Queue:     &outboxAdapter{box: box},
-			Log:       logger,
-			Wallets:   wallets,
-			Timezone:  cfg.Fund.Timezone,
+			Endpoint:   cfg.Fund.NodeEndpoint,
+			UseTLS:     cfg.Fund.NodeTLS,
+			Address:    cfg.Fund.Wallet,
+			BotAddress: botWalletAddr,
+			Forwarder:  forwarder,
+			ChannelID:  cfg.Mezon.ChannelID,
+			ThreadID:   cfg.Mezon.ThreadID,
+			Decimals:   cfg.Fund.Decimals,
+			Queue:      &outboxAdapter{box: box},
+			Log:        logger,
+			Wallets:    wallets,
+			Timezone:   cfg.Fund.Timezone,
 		}
 		if fundReader != nil {
 			stream.Balance = fundReader

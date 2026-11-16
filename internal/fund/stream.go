@@ -2,6 +2,7 @@ package fund
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,13 +32,15 @@ type BalanceReader interface {
 
 // Movement is one confirmed transaction involving the fund's wallet.
 type Movement struct {
-	Hash      string
-	Incoming  bool
-	Raw       *big.Int
-	At        time.Time
-	Sender    string
-	Recipient string
-	Content   string
+	Hash       string
+	Incoming   bool
+	Raw        *big.Int
+	At         time.Time
+	Sender     string
+	Recipient  string
+	Content    string
+	ExtraInfo  string
+	BotAddress string
 }
 
 // VND converts the raw token amount to whole đồng.
@@ -50,6 +53,8 @@ type Stream struct {
 	Endpoint   string
 	UseTLS     bool
 	Address    string
+	BotAddress string
+	Forwarder  *Forwarder
 	ChannelID  string
 	ThreadID   string
 	Decimals   int
@@ -136,6 +141,25 @@ func (s *Stream) read(ctx context.Context, stream events, giveUp func()) error {
 }
 
 func (s *Stream) handle(ctx context.Context, event *mmnpb.TransactionStatusInfo) {
+	if event == nil || event.GetTextData() == heartbeatNote {
+		return
+	}
+
+	// Only confirmed or finalized transactions moved actual money
+	switch event.GetStatus() {
+	case mmnpb.TransactionStatus_CONFIRMED, mmnpb.TransactionStatus_FINALIZED:
+	default:
+		return
+	}
+
+	// Case 1: Transaction sent TO the Bot Wallet -> Auto-forward to the Fund Wallet
+	if s.BotAddress != "" && event.GetRecipient() == s.BotAddress &&
+		event.GetSender() != s.BotAddress && event.GetSender() != s.Address {
+		s.handleBotIncoming(ctx, event)
+		return
+	}
+
+	// Case 2: Transaction involving the Fund Wallet (incoming to or outgoing from Fund)
 	m, ok := s.movement(event)
 	if !ok {
 		return
@@ -162,6 +186,59 @@ func (s *Stream) handle(ctx context.Context, event *mmnpb.TransactionStatusInfo)
 		s.logger().Info("fund movement announced",
 			"hash", m.Hash, "incoming", m.Incoming, "vnd", m.VND(s.Decimals))
 	}
+}
+
+func (s *Stream) handleBotIncoming(ctx context.Context, event *mmnpb.TransactionStatusInfo) {
+	hash := event.GetTxHash()
+	if hash == "" || s.isDuplicate("bot_fwd:"+hash) {
+		return
+	}
+
+	raw, ok := new(big.Int).SetString(event.GetAmount(), 10)
+	if !ok || raw.Sign() <= 0 {
+		return
+	}
+
+	m := Movement{
+		Hash:       hash,
+		Incoming:   true,
+		Raw:        raw,
+		At:         time.Now(),
+		Sender:     event.GetSender(),
+		Recipient:  event.GetRecipient(),
+		Content:    strings.TrimSpace(event.GetTextData()),
+		ExtraInfo:  strings.TrimSpace(event.GetExtraInfo()),
+		BotAddress: s.BotAddress,
+	}
+	if ts := event.GetTimestamp(); ts > 0 {
+		m.At = time.Unix(int64(ts), 0)
+	}
+
+	s.logger().Info("received incoming transfer to bot wallet",
+		"sender", m.Sender, "amount_vnd", m.VND(s.Decimals), "content", m.Content, "tx", hash)
+
+	if s.Forwarder == nil {
+		s.logger().Warn("bot forwarder is not configured (BOT_PRIVATE_KEY missing); cannot auto-forward to fund",
+			"sender", m.Sender, "amount", m.VND(s.Decimals))
+		return
+	}
+
+	fwdTxHash, err := s.Forwarder.Forward(ctx, m)
+	if err != nil {
+		s.logger().Error("failed to forward transfer from bot to fund",
+			"err", err, "sender", m.Sender, "amount_vnd", m.VND(s.Decimals))
+		s.clearDuplicate("bot_fwd:" + hash)
+		return
+	}
+
+	s.logger().Info("successfully forwarded transfer to fund wallet",
+		"fwd_tx_hash", fwdTxHash, "from_user", m.Sender, "amount_vnd", m.VND(s.Decimals))
+}
+
+func (s *Stream) clearDuplicate(hash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.seen, hash)
 }
 
 func (s *Stream) isDuplicate(hash string) bool {
@@ -221,13 +298,15 @@ func (s *Stream) movement(e *mmnpb.TransactionStatusInfo) (Movement, bool) {
 	}
 
 	return Movement{
-		Hash:      e.GetTxHash(),
-		Incoming:  incoming,
-		Raw:       raw,
-		At:        at,
-		Sender:    e.GetSender(),
-		Recipient: e.GetRecipient(),
-		Content:   strings.TrimSpace(e.GetTextData()),
+		Hash:       e.GetTxHash(),
+		Incoming:   incoming,
+		Raw:        raw,
+		At:         at,
+		Sender:     e.GetSender(),
+		Recipient:  e.GetRecipient(),
+		Content:    strings.TrimSpace(e.GetTextData()),
+		ExtraInfo:  strings.TrimSpace(e.GetExtraInfo()),
+		BotAddress: s.BotAddress,
 	}, true
 }
 
@@ -325,6 +404,77 @@ func (s *Stream) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// ForwardInfo contains the extracted user and content for transactions forwarded via bot.
+type ForwardInfo struct {
+	OriginalUser string
+	Content      string
+}
+
+// ParseForwardInfo extracts original user and message from a forwarded transaction.
+func ParseForwardInfo(m Movement, wMap *UserWalletMap) (ForwardInfo, bool) {
+	// 1. Check ExtraInfo if present (JSON)
+	if m.ExtraInfo != "" {
+		var extra map[string]string
+		if err := json.Unmarshal([]byte(m.ExtraInfo), &extra); err == nil {
+			if extra["type"] == "forward_via_bot" {
+				user := extra["original_user"]
+				if user == "" {
+					user = extra["original_sender"]
+					if wMap != nil && user != "" {
+						if u, ok := wMap.LookupUser(user); ok {
+							user = u
+						}
+					}
+				}
+				return ForwardInfo{
+					OriginalUser: user,
+					Content:      extra["original_content"],
+				}, true
+			}
+		}
+	}
+
+	// 2. Check TextData / Content for pattern:
+	// "<user> transfer via bot: <content>" or "<user> transfer via bot"
+	content := strings.TrimSpace(m.Content)
+	if strings.Contains(content, " transfer via bot: ") {
+		parts := strings.SplitN(content, " transfer via bot: ", 2)
+		user := strings.TrimSpace(parts[0])
+		if wMap != nil {
+			if u, ok := wMap.LookupUser(user); ok {
+				user = u
+			}
+		}
+		return ForwardInfo{
+			OriginalUser: user,
+			Content:      strings.TrimSpace(parts[1]),
+		}, true
+	}
+	if strings.HasSuffix(content, " transfer via bot") {
+		user := strings.TrimSuffix(content, " transfer via bot")
+		user = strings.TrimSpace(user)
+		if wMap != nil {
+			if u, ok := wMap.LookupUser(user); ok {
+				user = u
+			}
+		}
+		return ForwardInfo{
+			OriginalUser: user,
+			Content:      "",
+		}, true
+	}
+
+	// 3. Fallback: if sender is the bot wallet address
+	if m.BotAddress != "" && m.Sender == m.BotAddress {
+		return ForwardInfo{
+			OriginalUser: "Bot (trung gian)",
+			Content:      m.Content,
+		}, true
+	}
+
+	return ForwardInfo{}, false
+}
+
 // MovementText formats the announcement for a transaction.
 func MovementText(m Movement, decimals int, loc *time.Location, wallets ...*UserWalletMap) string {
 	sign, verb := "+", "Nhận vào quỹ"
@@ -348,6 +498,18 @@ func MovementText(m Movement, decimals int, loc *time.Location, wallets ...*User
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("%s %s%s VNĐ\n", verb, sign, FormatVND(m.VND(decimals))))
+
+	// Check if this incoming transaction was forwarded via bot
+	if m.Incoming {
+		if fwd, ok := ParseForwardInfo(m, wMap); ok {
+			sb.WriteString(fmt.Sprintf("Người gửi: %s (qua bot)\n", fwd.OriginalUser))
+			if fwd.Content != "" {
+				sb.WriteString(fmt.Sprintf("Nội dung: %s\n", fwd.Content))
+			}
+			sb.WriteString(t.Format("15:04 02/01/2006"))
+			return sb.String()
+		}
+	}
 
 	if targetAddr != "" {
 		displayName := targetAddr

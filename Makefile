@@ -1,10 +1,17 @@
-.PHONY: all build run test clean quy test-msg
+.PHONY: all build build-linux run test clean quy test-msg deploy
 
 all: build
 
 build:
 	@mkdir -p bin
 	go build -o bin/fundbot ./cmd/fundbot
+
+build-linux:
+	@mkdir -p bin
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/fundbot-linux-amd64 ./cmd/fundbot
+
+deploy: build-linux
+	@./deploy/setup.sh
 
 run:
 	go run ./cmd/fundbot
