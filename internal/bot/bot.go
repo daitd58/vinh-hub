@@ -373,7 +373,8 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 	if sportMgr.IsCurrentBillMessage(msgID) {
 		cleanEmoji := strings.ToLower(strings.Trim(emojiVal, ":"))
 		isPaidEmoji := cleanEmoji == "white_check_mark" || cleanEmoji == "check" || cleanEmoji == "✅" ||
-			cleanEmoji == "💵" || cleanEmoji == "👍" || cleanEmoji == "+1" || cleanEmoji == "moneybag" || cleanEmoji == "money_with_wings"
+			cleanEmoji == "heavy_check_mark" || cleanEmoji == "✔" || cleanEmoji == "ballot_box_with_check" || cleanEmoji == "☑" ||
+			cleanEmoji == "💵" || cleanEmoji == "👍" || cleanEmoji == "+1" || cleanEmoji == "moneybag" || cleanEmoji == "money_with_wings" || cleanEmoji == "ok_hand" || cleanEmoji == "👌"
 		if isPaidEmoji {
 			if !ev.Action {
 				if item, ok := sportMgr.MarkPaidByUserIDOrName(senderID, senderName); ok {
