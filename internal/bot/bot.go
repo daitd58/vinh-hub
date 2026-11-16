@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -368,6 +369,25 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 		}
 	}
 
+	// Check if this reaction is on the active split/money bill message
+	if sportMgr.IsCurrentBillMessage(msgID) {
+		cleanEmoji := strings.ToLower(strings.Trim(emojiVal, ":"))
+		isPaidEmoji := cleanEmoji == "white_check_mark" || cleanEmoji == "check" || cleanEmoji == "✅" ||
+			cleanEmoji == "💵" || cleanEmoji == "👍" || cleanEmoji == "+1" || cleanEmoji == "moneybag" || cleanEmoji == "money_with_wings"
+		if isPaidEmoji {
+			if !ev.Action {
+				if item, ok := sportMgr.MarkPaidByUserIDOrName(senderID, senderName); ok {
+					b.logger().Info("marked user as paid via reaction", "user", item.Username, "msg_id", msgID)
+				}
+			} else {
+				if _, _, err := sportMgr.MarkUnpaidBatch([]string{senderName}); err == nil {
+					b.logger().Info("unmarked user paid via reaction removal", "user", senderName, "msg_id", msgID)
+				}
+			}
+			return
+		}
+	}
+
 	sportMgr.RecordReaction(chanID, msgID, senderID, senderName, emojiVal, ev.Action, int(ev.Count))
 }
 
@@ -503,9 +523,19 @@ func (b *Bot) handleMessage(m *mezon.ChannelMessage) {
 		b.handleNhacLichCommand(m)
 	case cmd == "*summary" || cmd == "*vinhhub summary":
 		b.handleSummaryCommand(m)
+	case strings.HasPrefix(cmd, "*split") || strings.HasPrefix(cmd, "!split") || strings.HasPrefix(cmd, "/split"):
+		b.handleSplitCommand(m, text)
 	case strings.HasPrefix(cmd, "*money") || strings.HasPrefix(cmd, "!money") || strings.HasPrefix(cmd, "/money") ||
 		strings.HasPrefix(cmd, "*chiatien") || strings.HasPrefix(cmd, "!chiatien") || strings.HasPrefix(cmd, "/chiatien"):
 		b.handleMoneyCommand(m, text)
+	case cmd == "*paid" || strings.HasPrefix(cmd, "*paid ") || cmd == "!paid" || strings.HasPrefix(cmd, "!paid ") || cmd == "/paid" || strings.HasPrefix(cmd, "/paid "):
+		b.handlePaidCommand(m, text)
+	case cmd == "*unpaid" || strings.HasPrefix(cmd, "*unpaid ") || cmd == "!unpaid" || strings.HasPrefix(cmd, "!unpaid ") || cmd == "/unpaid" || strings.HasPrefix(cmd, "/unpaid "):
+		b.handleUnpaidCommand(m, text)
+	case cmd == "*bxh" || strings.HasPrefix(cmd, "*bxh ") || cmd == "!bxh" || strings.HasPrefix(cmd, "!bxh ") || cmd == "/bxh" || strings.HasPrefix(cmd, "/bxh ") ||
+		cmd == "*stats" || strings.HasPrefix(cmd, "*stats ") || cmd == "!stats" || strings.HasPrefix(cmd, "!stats ") ||
+		cmd == "*top" || strings.HasPrefix(cmd, "*top "):
+		b.handleBXHCommand(m, text)
 	case strings.HasPrefix(cmd, "*register qr") || strings.HasPrefix(cmd, "!register qr") || strings.HasPrefix(cmd, "/register qr"):
 		b.handleRegisterQRCommand(m, text)
 	}
@@ -661,6 +691,108 @@ func (b *Bot) handleFundCommand(m *mezon.ChannelMessage) {
 	_ = b.reply(m, report)
 }
 
+func (b *Bot) handleSplitCommand(m *mezon.ChannelMessage, rawText string) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+
+	parts := strings.Fields(rawText)
+	if len(parts) < 2 {
+		_ = b.reply(m, "⚠️ Vui lòng nhập chi phí cần chia.\nVí dụ:\n• `*split 360k + 26*3` (tiền sân 360k + 3 quả cầu giá 26k/quả)\n• `*split 360k san 45k cau`\n• `*split 450k`")
+		return
+	}
+
+	expr := strings.TrimSpace(rawText[len(parts[0]):])
+	bill, breakdown, err := sportMgr.CreateSplitBill(expr)
+	if err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+		return
+	}
+
+	title := "🏸 **[CHIA TIỀN CẦU LÔNG"
+	if bill.MatchDay != "" && bill.MatchDate != "" {
+		title += fmt.Sprintf(" - %s (%s)", strings.ToUpper(bill.MatchDay), bill.MatchDate)
+	}
+	title += "]**"
+
+	var sb strings.Builder
+	sb.WriteString(title + "\n\n")
+
+	sb.WriteString("📊 **Chi tiết chi phí:**\n")
+	sb.WriteString(fmt.Sprintf("• 🏟️ Tiền sân: **%s VNĐ**\n", fund.FormatVND(breakdown.CourtFee)))
+	if breakdown.ShuttleFee > 0 {
+		if breakdown.ShuttleCount > 0 {
+			sb.WriteString(fmt.Sprintf("• 🏸 Tiền cầu (%d quả x %s): **%s VNĐ**\n",
+				breakdown.ShuttleCount, fund.FormatVND(breakdown.ShuttlePrice), fund.FormatVND(breakdown.ShuttleFee)))
+		} else {
+			sb.WriteString(fmt.Sprintf("• 🏸 Tiền cầu: **%s VNĐ**\n", fund.FormatVND(breakdown.ShuttleFee)))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("💰 **Tổng chi phí:** **%s VNĐ**\n", fund.FormatVND(breakdown.TotalFee)))
+	sb.WriteString(fmt.Sprintf("👥 Số người tham gia: **%d người** (**%d slot**)\n", len(bill.Items), bill.TotalSlots))
+	sb.WriteString(fmt.Sprintf("💵 Đơn giá: **%s VNĐ/slot** *(đã làm tròn)*\n\n", fund.FormatVND(bill.SlotPrice)))
+
+	sb.WriteString("📋 **Danh sách thanh toán:**\n")
+	var mentions []mezon.Mention
+	var sortedItems []*sport.BillItem
+	for _, item := range bill.Items {
+		sortedItems = append(sortedItems, item)
+	}
+	sort.Slice(sortedItems, func(i, j int) bool {
+		return sortedItems[i].Username < sortedItems[j].Username
+	})
+
+	for _, item := range sortedItems {
+		slotText := fmt.Sprintf("%d slot", item.Slots)
+		tag := "@" + item.Username
+		sb.WriteString(fmt.Sprintf("• %s (%s): **%s VNĐ**\n", tag, slotText, fund.FormatVND(item.Amount)))
+		mentions = append(mentions, mezon.Mention{
+			UserID:   item.UserID,
+			Username: item.Username,
+		})
+	}
+
+	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React ✅ vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
+
+	qrURL := sportMgr.GetPaymentQR()
+	signedQRURL := qrURL
+	if b.client != nil {
+		if s, err := vinhhub.SignCDNURL(b.client, qrURL); err == nil && s != "" {
+			signedQRURL = s
+		}
+	}
+
+	opts := &mezon.SendOptions{
+		Mentions: mentions,
+	}
+	if signedQRURL != "" {
+		opts.Attachments = []mezon.Attachment{
+			{
+				Filename: "",
+				Filetype: "image/png",
+				URL:      signedQRURL,
+				Width:    947,
+				Height:   2048,
+			},
+		}
+	}
+
+	sentMsgID, err := b.replyWithOptionsGetID(m, sb.String(), opts)
+	if err != nil {
+		b.logger().Error("failed to send split message", "err", err)
+		_ = b.reply(m, fmt.Sprintf("⚠️ Gửi bảng chia tiền thất bại: %v", err))
+		return
+	}
+	if sentMsgID != "" {
+		sportMgr.SetCurrentBillMessageID(sentMsgID)
+	}
+}
+
 func (b *Bot) handleMoneyCommand(m *mezon.ChannelMessage, rawText string) {
 	b.mu.RLock()
 	sportMgr := b.sportMgr
@@ -690,45 +822,230 @@ func (b *Bot) handleMoneyCommand(m *mezon.ChannelMessage, rawText string) {
 		return
 	}
 
-	matchDay, matchDate, participants := sportMgr.GetParticipantsForMoney()
-	if len(participants) == 0 {
-		_ = b.reply(m, "⚠️ Chưa có danh sách người tham gia buổi đánh hôm trước để chia tiền.")
+	bill, err := sportMgr.CreateMoneyBill(unitAmount)
+	if err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
 		return
 	}
 
-	totalSlots := 0
-	for _, p := range participants {
-		totalSlots += p.Slots
-	}
-	totalAmount := totalSlots * unitAmount
-
 	title := "🏸 **[CHIA TIỀN CẦU LÔNG"
-	if matchDay != "" && matchDate != "" {
-		title += fmt.Sprintf(" - %s (%s)", strings.ToUpper(matchDay), matchDate)
+	if bill.MatchDay != "" && bill.MatchDate != "" {
+		title += fmt.Sprintf(" - %s (%s)", strings.ToUpper(bill.MatchDay), bill.MatchDate)
 	}
 	title += "]**"
 
 	var sb strings.Builder
 	sb.WriteString(title + "\n\n")
-	sb.WriteString(fmt.Sprintf("📊 Tổng kết buổi đánh hôm trước: **%d người** (**%d slot**)\n", len(participants), totalSlots))
-	sb.WriteString(fmt.Sprintf("💵 Số tiền mỗi slot: **%s VNĐ**\n", fund.FormatVND(int64(unitAmount))))
-	sb.WriteString(fmt.Sprintf("💰 Tổng cộng: **%s VNĐ**\n\n", fund.FormatVND(int64(totalAmount))))
+	sb.WriteString(fmt.Sprintf("📊 Tổng kết buổi đánh: **%d người** (**%d slot**)\n", len(bill.Items), bill.TotalSlots))
+	sb.WriteString(fmt.Sprintf("💵 Số tiền mỗi slot: **%s VNĐ**\n", fund.FormatVND(bill.SlotPrice)))
+	sb.WriteString(fmt.Sprintf("💰 Tổng cộng: **%s VNĐ**\n\n", fund.FormatVND(bill.TotalAmount)))
 	sb.WriteString("📋 **Danh sách thanh toán:**\n")
 
 	var mentions []mezon.Mention
-	for _, p := range participants {
-		userAmount := p.Slots * unitAmount
-		slotText := fmt.Sprintf("%d slot", p.Slots)
-		tag := "@" + p.Username
-		sb.WriteString(fmt.Sprintf("• %s (%s): **%s VNĐ**\n", tag, slotText, fund.FormatVND(int64(userAmount))))
+	var sortedItems []*sport.BillItem
+	for _, item := range bill.Items {
+		sortedItems = append(sortedItems, item)
+	}
+	sort.Slice(sortedItems, func(i, j int) bool {
+		return sortedItems[i].Username < sortedItems[j].Username
+	})
+
+	for _, item := range sortedItems {
+		slotText := fmt.Sprintf("%d slot", item.Slots)
+		tag := "@" + item.Username
+		sb.WriteString(fmt.Sprintf("• %s (%s): **%s VNĐ**\n", tag, slotText, fund.FormatVND(item.Amount)))
 
 		mentions = append(mentions, mezon.Mention{
-			UserID:   p.UserID,
-			Username: p.Username,
+			UserID:   item.UserID,
+			Username: item.Username,
 		})
 	}
 
-	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé! Cảm ơn cả nhà! 🏸🔥")
+	sb.WriteString("\n👉 Mọi người quét mã QR bên dưới để thanh toán nhé!\n*(React ✅ vào tin nhắn này hoặc gõ `*paid` sau khi đã chuyển khoản)* 🏸🔥")
+
+	qrURL := sportMgr.GetPaymentQR()
+	signedQRURL := qrURL
+	if b.client != nil {
+		if s, err := vinhhub.SignCDNURL(b.client, qrURL); err == nil && s != "" {
+			signedQRURL = s
+		}
+	}
+
+	opts := &mezon.SendOptions{
+		Mentions: mentions,
+	}
+
+	if signedQRURL != "" {
+		opts.Attachments = []mezon.Attachment{
+			{
+				Filename: "",
+				Filetype: "image/png",
+				URL:      signedQRURL,
+				Width:    947,
+				Height:   2048,
+			},
+		}
+	}
+
+	sentMsgID, err := b.replyWithOptionsGetID(m, sb.String(), opts)
+	if err != nil {
+		b.logger().Error("failed to send money split message", "err", err)
+		_ = b.reply(m, fmt.Sprintf("⚠️ Gửi bảng chia tiền thất bại: %v", err))
+		return
+	}
+	if sentMsgID != "" {
+		sportMgr.SetCurrentBillMessageID(sentMsgID)
+	}
+}
+
+func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+
+	parts := strings.Fields(rawText)
+	args := parts[1:]
+
+	if len(args) > 0 {
+		paid, notFound, totalPaid, totalCost, paidCount, totalCount, err := sportMgr.MarkPaidBatch(args)
+		if err != nil {
+			_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+			return
+		}
+
+		var sb strings.Builder
+		if len(paid) > 0 {
+			var names []string
+			for _, p := range paid {
+				names = append(names, "@"+p.Username)
+			}
+			sb.WriteString(fmt.Sprintf("✅ **Đã ghi nhận đóng tiền:** %s 💵\n\n", strings.Join(names, ", ")))
+		}
+		if len(notFound) > 0 {
+			sb.WriteString(fmt.Sprintf("⚠️ *Không tìm thấy trong hoá đơn:* %s\n\n", strings.Join(notFound, ", ")))
+		}
+		sb.WriteString(fmt.Sprintf("📊 **Tiến độ thu tiền:** %d/%d người (%s / %s VNĐ)",
+			paidCount, totalCount, fund.FormatVND(totalPaid), fund.FormatVND(totalCost)))
+		_ = b.reply(m, sb.String())
+		return
+	}
+
+	// No args -> Show payment dashboard
+	bill, paid, unpaid, totalPaid, totalCost, err := sportMgr.GetBillStatus()
+	if err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📋 **TIẾN ĐỘ THU TIỀN CẦU LÔNG**\n")
+	if bill.MatchDay != "" && bill.MatchDate != "" {
+		sb.WriteString(fmt.Sprintf("🏸 Buổi đánh: **%s (%s)**\n", bill.MatchDay, bill.MatchDate))
+	}
+	sb.WriteString(fmt.Sprintf("💰 Tổng chi phí: **%s VNĐ** (%d slot • **%s VNĐ/slot**)\n",
+		fund.FormatVND(totalCost), bill.TotalSlots, fund.FormatVND(bill.SlotPrice)))
+	sb.WriteString(fmt.Sprintf("💵 Đã thu: **%s VNĐ** (%d/%d người)\n",
+		fund.FormatVND(totalPaid), len(paid), len(bill.Items)))
+
+	remaining := totalCost - totalPaid
+	if remaining < 0 {
+		remaining = 0
+	}
+	sb.WriteString(fmt.Sprintf("⏳ Còn thiếu: **%s VNĐ** (%d/%d người)\n\n",
+		fund.FormatVND(remaining), len(unpaid), len(bill.Items)))
+
+	if len(paid) > 0 {
+		sb.WriteString(fmt.Sprintf("✅ **Đã thanh toán (%d người):**\n", len(paid)))
+		for _, item := range paid {
+			sb.WriteString(fmt.Sprintf("• @%s (%d slot - %s VNĐ)\n", item.Username, item.Slots, fund.FormatVND(item.Amount)))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(unpaid) > 0 {
+		sb.WriteString(fmt.Sprintf("⏳ **Chưa thanh toán (%d người):**\n", len(unpaid)))
+		for _, item := range unpaid {
+			sb.WriteString(fmt.Sprintf("• @%s (%d slot - %s VNĐ)\n", item.Username, item.Slots, fund.FormatVND(item.Amount)))
+		}
+	} else {
+		sb.WriteString("🎉 *Toàn bộ thành viên đã hoàn tất đóng tiền! Cảm ơn cả nhà!* 🏸❤️")
+	}
+
+	_ = b.reply(m, sb.String())
+}
+
+func (b *Bot) handleUnpaidCommand(m *mezon.ChannelMessage, rawText string) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+
+	parts := strings.Fields(rawText)
+	args := parts[1:]
+
+	if len(args) > 0 {
+		unmarked, notFound, err := sportMgr.MarkUnpaidBatch(args)
+		if err != nil {
+			_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+			return
+		}
+
+		var sb strings.Builder
+		if len(unmarked) > 0 {
+			var names []string
+			for _, u := range unmarked {
+				names = append(names, "@"+u.Username)
+			}
+			sb.WriteString(fmt.Sprintf("↩️ Đã chuyển %s về trạng thái **CHƯA thanh toán**.\n", strings.Join(names, ", ")))
+		}
+		if len(notFound) > 0 {
+			sb.WriteString(fmt.Sprintf("⚠️ *Không tìm thấy trong hoá đơn:* %s", strings.Join(notFound, ", ")))
+		}
+		_ = b.reply(m, sb.String())
+		return
+	}
+
+	// No args -> Remind unpaid participants with QR code & mentions
+	bill, unpaid, totalUnpaid, err := sportMgr.GetUnpaidList()
+	if err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+		return
+	}
+
+	if len(unpaid) == 0 {
+		_ = b.reply(m, "🎉 **Toàn bộ anh em đã hoàn tất đóng tiền!**\nCảm ơn cả nhà nhiều nhé! 🏸❤️")
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📢 **NHẮC THANH TOÁN TIỀN CẦU LÔNG** 🏸\n")
+	if bill.MatchDay != "" && bill.MatchDate != "" {
+		sb.WriteString(fmt.Sprintf("Buổi đánh: **%s (%s)**\n", bill.MatchDay, bill.MatchDate))
+	}
+	sb.WriteString(fmt.Sprintf("Đơn giá: **%s VNĐ/slot**\n\n", fund.FormatVND(bill.SlotPrice)))
+
+	sb.WriteString(fmt.Sprintf("👉 Danh sách còn **%d người** chưa thanh toán:\n", len(unpaid)))
+	var mentions []mezon.Mention
+	for _, item := range unpaid {
+		tag := "@" + item.Username
+		sb.WriteString(fmt.Sprintf("• %s (%d slot): **%s VNĐ**\n", tag, item.Slots, fund.FormatVND(item.Amount)))
+		mentions = append(mentions, mezon.Mention{
+			UserID:   item.UserID,
+			Username: item.Username,
+		})
+	}
+
+	sb.WriteString(fmt.Sprintf("\n💰 Tổng còn thiếu: **%s VNĐ**\n", fund.FormatVND(totalUnpaid)))
+	sb.WriteString("👉 Mọi người vui lòng quét mã QR bên dưới để thanh toán sớm nhé! 🔥")
 
 	qrURL := sportMgr.GetPaymentQR()
 	signedQRURL := qrURL
@@ -755,9 +1072,34 @@ func (b *Bot) handleMoneyCommand(m *mezon.ChannelMessage, rawText string) {
 	}
 
 	if err := b.replyWithOptions(m, sb.String(), opts); err != nil {
-		b.logger().Error("failed to send money split message", "err", err)
-		_ = b.reply(m, fmt.Sprintf("⚠️ Gửi bảng chia tiền thất bại: %v", err))
+		b.logger().Error("failed to send unpaid reminder message", "err", err)
+		_ = b.reply(m, fmt.Sprintf("⚠️ Gửi nhắc thanh toán thất bại: %v", err))
 	}
+}
+
+func (b *Bot) handleBXHCommand(m *mezon.ChannelMessage, rawText string) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+
+	parts := strings.Fields(rawText)
+	monthInput := ""
+	if len(parts) >= 2 {
+		monthInput = parts[1]
+	}
+
+	report, err := sportMgr.GetLeaderboardText(monthInput, time.Now())
+	if err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+		return
+	}
+
+	_ = b.reply(m, report)
 }
 
 func (b *Bot) handleRegisterQRCommand(m *mezon.ChannelMessage, rawText string) {
@@ -793,8 +1135,12 @@ func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 		"• `*diemdanh`: Gửi thông báo điểm danh cho buổi đánh cầu tiếp theo\n" +
 		"• `*nhaclich`: Nhắc lịch trước giờ đánh & AI tóm tắt ai đi ai nghỉ, sân nào\n" +
 		"• `*summary`: Xem nhanh danh sách điểm danh và sân bãi hiện tại\n" +
-		"• `*money <số_tiền>`: Chia tiền buổi đánh hôm trước, tag người tham gia + tính tiền theo slot + gửi mã QR (ví dụ: `*money 45k`)\n" +
-		"• `*money qr <link>`: Cập nhật mã QR thanh toán mới\n\n" +
+		"• `*split <công_thức>`: Chia tiền sân + cầu (ví dụ: `*split 360k + 26*3` hoặc `*split 360k san 45k cau`)\n" +
+		"• `*money <số_tiền>`: Chia tiền theo slot cố định (ví dụ: `*money 45k`)\n" +
+		"• `*paid [@user...]`: Đánh dấu ai đã đóng tiền hoặc xem tiến độ thu tiền\n" +
+		"• `*unpaid [@user...]`: Nhắc nhở người chưa đóng kèm mã QR hoặc hủy đánh dấu nhầm\n" +
+		"• `*bxh [tháng]`: Bảng xếp hạng \"Chiến thần quật cầu\" & \"Chúa sủi\" (ví dụ: `*bxh` hoặc `*bxh 11/2026`)\n" +
+		"• `*register qr <link>`: Cập nhật mã QR thanh toán mới\n\n" +
 		"• `*help`: Hiển thị hướng dẫn này"
 	_ = b.reply(m, help)
 }
@@ -833,7 +1179,7 @@ func ParseMarkdownSpans(text string) (string, []map[string]any) {
 	return clean.String(), spans
 }
 
-func (b *Bot) replyWithOptions(m *mezon.ChannelMessage, text string, opts *mezon.SendOptions) error {
+func (b *Bot) replyWithOptionsGetID(m *mezon.ChannelMessage, text string, opts *mezon.SendOptions) (string, error) {
 	if opts == nil {
 		opts = &mezon.SendOptions{}
 	}
@@ -852,11 +1198,16 @@ func (b *Bot) replyWithOptions(m *mezon.ChannelMessage, text string, opts *mezon
 		targetID = m.TopicID
 	}
 
-	_, err := b.SendToChannel(context.Background(), targetID, text, opts)
+	msgID, err := b.SendToChannel(context.Background(), targetID, text, opts)
 	if err != nil && targetID != m.ChannelID && m.ChannelID != "" {
 		// Fallback to parent channel with TopicID
-		_, err = b.SendToChannel(context.Background(), m.ChannelID, text, opts)
+		msgID, err = b.SendToChannel(context.Background(), m.ChannelID, text, opts)
 	}
+	return msgID, err
+}
+
+func (b *Bot) replyWithOptions(m *mezon.ChannelMessage, text string, opts *mezon.SendOptions) error {
+	_, err := b.replyWithOptionsGetID(m, text, opts)
 	return err
 }
 

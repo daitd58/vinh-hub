@@ -191,7 +191,16 @@ When the bot is running in your channel or thread:
 - `*diemdanh` (hoặc `*vinhhub diemdanh`): Kích hoạt ngay thông báo điểm danh cho buổi đánh tiếp theo (ping role `@Vinh-CL`).
 - `*nhaclich`: Gửi ngay tin nhắn nhắc lịch kèm AI tóm tắt danh sách tham gia, vắng mặt, và sân bãi.
 - `*summary`: Xem nhanh tình hình điểm danh hiện tại mà không cần đợi cron.
-- `*money <số_tiền>`: Chia tiền buổi đánh hôm trước, tag danh sách người tham gia, tính số tiền theo số slot (ví dụ react `:cong1:` 2 lần = 2 slot = 90k) và gửi kèm mã QR thanh toán (ví dụ: `*money 45k`).
+- `*split <công_thức>`: Chia tiền sân + cầu linh hoạt (ví dụ: `*split 360k + 26*3`, `*split 360k + 26k*4`, `*split 360k san 45k cau`, `*split 450k`). Tự động tính tổng tiền, chia đều theo slot buổi đánh hôm trước, làm tròn lên 1.000đ, tag người tham gia và gửi mã QR thanh toán.
+- `*money <số_tiền>`: Chia tiền theo đơn giá slot cố định (ví dụ: `*money 45k`).
+- `*paid [@user...]`:
+  - `*paid @user1 @user2`: Đánh dấu thành viên đã thanh toán.
+  - `*paid` (không tham số): Hiển thị dashboard tiến độ thu tiền (ai đã đóng, ai chưa đóng, tổng đã thu / còn thiếu).
+  - *Mẹo*: Thành viên có thể react `✅`, `💵`, `👍` trực tiếp vào tin nhắn chia tiền để bot tự động ghi nhận đã đóng tiền!
+- `*unpaid [@user...]`:
+  - `*unpaid @user1`: Chuyển trạng thái về chưa thanh toán (nếu lỡ mark nhầm).
+  - `*unpaid` (không tham số): Lọc danh sách những người chưa đóng tiền, tag trực tiếp để nhắc nhở và đính kèm mã QR thanh toán.
+- `*bxh [tháng]` (hoặc `*stats`): Xem bảng xếp hạng tháng (ví dụ: `*bxh`, `*bxh 11/2026`). Thống kê tổng số buổi, Top "Chăm chỉ" trao danh hiệu `👑 Chiến thần quật cầu`, và Top "Chúa sủi" trao danh hiệu `🍗 Chúa sủi của tháng`. Bot cũng tự động cron chạy vào 20:00 ngày cuối tháng để thông báo vào kênh.
 - `*money qr <link_qr>` (hoặc `*register qr <link_qr>`): Cập nhật mã QR thanh toán mới.
 - `*help`: Hiển thị bảng hướng dẫn lệnh.
 

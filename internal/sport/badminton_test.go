@@ -428,3 +428,238 @@ func TestPreviousMatchArchivingOnTriggerDiemDanh(t *testing.T) {
 		t.Fatalf("expected 2 participants from previous match, got %d", len(participants))
 	}
 }
+
+func TestParseSplitFormula(t *testing.T) {
+	tests := []struct {
+		input       string
+		courtFee    int64
+		shuttleCnt  int
+		shuttleFee  int64
+		totalFee    int64
+		expectErr   bool
+	}{
+		{"360k + 26*3", 360000, 3, 78000, 438000, false},
+		{"360k + 26k*3", 360000, 3, 78000, 438000, false},
+		{"360k + 3*26k", 360000, 3, 78000, 438000, false},
+		{"360k + 3*26", 360000, 3, 78000, 438000, false},
+		{"360k + 26*4 cau", 360000, 4, 104000, 464000, false},
+		{"360k + 3 cau", 360000, 3, 78000, 438000, false},
+		{"360k + 3 quả cầu", 360000, 3, 78000, 438000, false},
+		{"360k + 45k", 360000, 0, 45000, 405000, false},
+		{"360k san 45k cau", 360000, 0, 45000, 405000, false},
+		{"360k san 3 cau", 360000, 3, 78000, 438000, false},
+		{"360k san 26*3 cau", 360000, 3, 78000, 438000, false},
+		{"450k", 450000, 0, 0, 450000, false},
+		{"360.000 + 26.000 * 3", 360000, 3, 78000, 438000, false},
+		{"", 0, 0, 0, 0, true},
+	}
+
+	for _, tc := range tests {
+		res, err := ParseSplitFormula(tc.input)
+		if tc.expectErr {
+			if err == nil {
+				t.Errorf("expected error for %q, got nil", tc.input)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("unexpected error for %q: %v", tc.input, err)
+			continue
+		}
+		if res.CourtFee != tc.courtFee {
+			t.Errorf("[%s] expected court fee %d, got %d", tc.input, tc.courtFee, res.CourtFee)
+		}
+		if tc.shuttleCnt > 0 && res.ShuttleCount != tc.shuttleCnt {
+			t.Errorf("[%s] expected shuttle count %d, got %d", tc.input, tc.shuttleCnt, res.ShuttleCount)
+		}
+		if res.ShuttleFee != tc.shuttleFee {
+			t.Errorf("[%s] expected shuttle fee %d, got %d", tc.input, tc.shuttleFee, res.ShuttleFee)
+		}
+		if res.TotalFee != tc.totalFee {
+			t.Errorf("[%s] expected total fee %d, got %d", tc.input, tc.totalFee, res.TotalFee)
+		}
+	}
+}
+
+func TestCreateSplitBillAndPaymentTracking(t *testing.T) {
+	sender := &mockSender{}
+	mgr := NewManager(Config{
+		Enabled:   true,
+		ChannelID: "sport-chan",
+		RoleID:    "1840693979155271680",
+		RoleName:  "Vinh-CL",
+		StatePath: t.TempDir() + "/badminton.json",
+	}, sender)
+
+	mgr.state.MatchDay = "Thứ Ba"
+	mgr.state.MatchDate = "17/11/2026"
+	mgr.RecordReaction("sport-chan", "m1", "u1", "dai.trinhduc", ":cong1:", false, 2)
+	mgr.RecordReaction("sport-chan", "m1", "u2", "user2", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u3", "user3", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u4", "user4", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u5", "user5", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u6", "user6", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u7", "user7", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m1", "u8", "user8", ":cong1:", false, 1)
+
+	// Total slots = 2 + 7 = 9 slots. Total fee = 360k + 78k = 438,000.
+	// 438,000 / 9 = 48,666.67 -> rounds up to 49,000 VND / slot.
+	bill, breakdown, err := mgr.CreateSplitBill("360k + 26*3")
+	if err != nil {
+		t.Fatalf("CreateSplitBill failed: %v", err)
+	}
+
+	if breakdown.TotalFee != 438000 {
+		t.Errorf("expected total fee 438k, got %d", breakdown.TotalFee)
+	}
+	if bill.SlotPrice != 49000 {
+		t.Errorf("expected slot price 49k, got %d", bill.SlotPrice)
+	}
+
+	u1Item := bill.Items["u1"]
+	if u1Item == nil || u1Item.Amount != 98000 {
+		t.Errorf("expected u1 (2 slots) to owe 98k, got %v", u1Item)
+	}
+	u2Item := bill.Items["u2"]
+	if u2Item == nil || u2Item.Amount != 49000 {
+		t.Errorf("expected u2 (1 slot) to owe 49k, got %v", u2Item)
+	}
+
+	// Test message ID association
+	mgr.SetCurrentBillMessageID("bill-msg-123")
+	if !mgr.IsCurrentBillMessage("bill-msg-123") {
+		t.Errorf("expected IsCurrentBillMessage to return true")
+	}
+
+	// 1. Mark u1 paid via reaction / userID
+	item, ok := mgr.MarkPaidByUserIDOrName("u1", "dai.trinhduc")
+	if !ok || !item.Paid {
+		t.Errorf("expected u1 to be marked paid")
+	}
+
+	// 2. Mark u2 and u3 paid via batch command
+	paid, notFound, totalPaid, _, paidCount, totalCount, err := mgr.MarkPaidBatch([]string{"@user2", "user3", "unknown_user"})
+	if err != nil {
+		t.Fatalf("MarkPaidBatch failed: %v", err)
+	}
+	if len(paid) != 2 {
+		t.Errorf("expected 2 paid items, got %d", len(paid))
+	}
+	if len(notFound) != 1 || notFound[0] != "unknown_user" {
+		t.Errorf("expected unknown_user in notFound, got %v", notFound)
+	}
+	if paidCount != 3 || totalCount != 8 {
+		t.Errorf("expected 3/8 paid, got %d/%d", paidCount, totalCount)
+	}
+	// u1 (98k) + u2 (49k) + u3 (49k) = 196,000
+	if totalPaid != 196000 {
+		t.Errorf("expected totalPaid 196k, got %d", totalPaid)
+	}
+
+	// 3. Test GetBillStatus
+	_, paidList, unpaidList, curPaid, _, err := mgr.GetBillStatus()
+	if err != nil {
+		t.Fatalf("GetBillStatus failed: %v", err)
+	}
+	if len(paidList) != 3 || len(unpaidList) != 5 {
+		t.Errorf("expected 3 paid, 5 unpaid, got %d paid, %d unpaid", len(paidList), len(unpaidList))
+	}
+	if curPaid != 196000 {
+		t.Errorf("expected curPaid 196k, got %d", curPaid)
+	}
+
+	// 4. Test GetUnpaidList
+	_, unpaidItems, totalUnpaid, err := mgr.GetUnpaidList()
+	if err != nil {
+		t.Fatalf("GetUnpaidList failed: %v", err)
+	}
+	if len(unpaidItems) != 5 {
+		t.Errorf("expected 5 unpaid items, got %d", len(unpaidItems))
+	}
+	// 5 unpaid * 49k = 245,000
+	if totalUnpaid != 245000 {
+		t.Errorf("expected totalUnpaid 245k, got %d", totalUnpaid)
+	}
+
+	// 5. Test MarkUnpaidBatch (e.g. unmarking u2)
+	unmarked, notFound2, err := mgr.MarkUnpaidBatch([]string{"@user2"})
+	if err != nil {
+		t.Fatalf("MarkUnpaidBatch failed: %v", err)
+	}
+	if len(unmarked) != 1 || unmarked[0].Paid != false {
+		t.Errorf("expected user2 to be unmarked paid")
+	}
+	if len(notFound2) != 0 {
+		t.Errorf("unexpected notFound items: %v", notFound2)
+	}
+
+	_, paidList2, _, _, _, _ := mgr.GetBillStatus()
+	if len(paidList2) != 2 {
+		t.Errorf("expected 2 paid items after unmarking user2, got %d", len(paidList2))
+	}
+}
+
+func TestLeaderboard(t *testing.T) {
+	sender := &mockSender{}
+	mgr := NewManager(Config{
+		Enabled:   true,
+		ChannelID: "sport-chan",
+		RoleID:    "1840693979155271680",
+		RoleName:  "Vinh-CL",
+		StatePath: t.TempDir() + "/badminton.json",
+	}, sender)
+
+	// Add 3 matches in November 2026
+	mgr.state.MatchHistory = []MatchRecord{
+		{
+			SessionID: "m1",
+			MatchDay:  "Thứ Ba",
+			MatchDate: "03/11/2026",
+			Attendees: []Participant{
+				{Username: "dai.trinhduc", Slots: 2},
+				{Username: "nam.nguyen", Slots: 1},
+			},
+			Absentees: []string{"sui.master"},
+		},
+		{
+			SessionID: "m2",
+			MatchDay:  "Thứ Năm",
+			MatchDate: "05/11/2026",
+			Attendees: []Participant{
+				{Username: "dai.trinhduc", Slots: 1},
+				{Username: "nam.nguyen", Slots: 1},
+			},
+			Absentees: []string{"sui.master", "luoi.bieng"},
+		},
+		{
+			SessionID: "m3",
+			MatchDay:  "Thứ Bảy",
+			MatchDate: "07/11/2026",
+			Attendees: []Participant{
+				{Username: "dai.trinhduc", Slots: 1},
+			},
+			Absentees: []string{"nam.nguyen", "sui.master"},
+		},
+	}
+
+	now := time.Date(2026, 11, 30, 20, 0, 0, 0, time.UTC)
+	text, err := mgr.GetLeaderboardText("11/2026", now)
+	if err != nil {
+		t.Fatalf("GetLeaderboardText failed: %v", err)
+	}
+
+	if !strings.Contains(text, "THÁNG 11/2026") {
+		t.Errorf("expected text to mention THÁNG 11/2026, got %s", text)
+	}
+	if !strings.Contains(text, "Tổng số buổi đã tổ chức: **3 buổi**") {
+		t.Errorf("expected 3 matches, got %s", text)
+	}
+	// dai.trinhduc attended 3/3 -> Chiến thần quật cầu
+	if !strings.Contains(text, "👑 **@dai.trinhduc**: 3/3 buổi") || !strings.Contains(text, "Chiến thần quật cầu") {
+		t.Errorf("expected dai.trinhduc as Chien than quat cau, got %s", text)
+	}
+	// sui.master absent 3 times -> Chúa sủi của tháng
+	if !strings.Contains(text, "🍗 **@sui.master**: **3 lần**") || !strings.Contains(text, "Chúa sủi của tháng") {
+		t.Errorf("expected sui.master as Chua sui, got %s", text)
+	}
+}

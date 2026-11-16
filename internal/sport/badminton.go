@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -35,7 +36,62 @@ type Participant struct {
 	Slots    int    `json:"slots"`
 }
 
-// AttendanceState persists the current check-in session and recent messages.
+// BillItem represents a single participant's share in a badminton bill.
+type BillItem struct {
+	UserID   string     `json:"user_id"`
+	Username string     `json:"username"`
+	Slots    int        `json:"slots"`
+	Amount   int64      `json:"amount"`
+	Paid     bool       `json:"paid"`
+	PaidAt   *time.Time `json:"paid_at,omitempty"`
+}
+
+// BillSession holds the current active payment/splitting session.
+type BillSession struct {
+	ID           string               `json:"id"`
+	MatchDay     string               `json:"match_day"`
+	MatchDate    string               `json:"match_date"`
+	CourtFee     int64                `json:"court_fee"`
+	ShuttleCount int                  `json:"shuttle_count"`
+	ShuttlePrice int64                `json:"shuttle_price"`
+	ShuttleFee   int64                `json:"shuttle_fee"`
+	TotalAmount  int64                `json:"total_amount"`
+	TotalSlots   int                  `json:"total_slots"`
+	SlotPrice    int64                `json:"slot_price"`
+	Items        map[string]*BillItem `json:"items"` // keyed by userID
+	MessageID    string               `json:"message_id,omitempty"`
+	CreatedAt    time.Time            `json:"created_at"`
+}
+
+// MatchRecord stores historical attendance of a completed match for stats & leaderboard.
+type MatchRecord struct {
+	SessionID   string        `json:"session_id"`
+	MatchDay    string        `json:"match_day"`
+	MatchDate   string        `json:"match_date"` // DD/MM/YYYY
+	Attendees   []Participant `json:"attendees"`
+	Absentees   []string      `json:"absentees"`
+	CompletedAt time.Time     `json:"completed_at"`
+}
+
+// SplitBreakdown details the parsed court and shuttle fees.
+type SplitBreakdown struct {
+	CourtFee     int64
+	ShuttleCount int
+	ShuttlePrice int64
+	ShuttleFee   int64
+	TotalFee     int64
+}
+
+// LeaderboardEntry tracks aggregate attendance statistics for a member.
+type LeaderboardEntry struct {
+	Username    string
+	Matches     int
+	Slots       int
+	Rate        float64
+	AbsentCount int
+}
+
+// AttendanceState persists the current check-in session, bill, and history.
 type AttendanceState struct {
 	SessionID                  string                 `json:"session_id"`          // e.g. "match-2026-11-17"
 	CallTime                   time.Time              `json:"call_time"`           // when check-in was triggered
@@ -53,6 +109,9 @@ type AttendanceState struct {
 	PreviousMatchDay           string                 `json:"previous_match_day,omitempty"`
 	PreviousMatchDate          string                 `json:"previous_match_date,omitempty"`
 	CustomPaymentQR            string                 `json:"custom_payment_qr,omitempty"`
+	CurrentBill                *BillSession           `json:"current_bill,omitempty"`
+	MatchHistory               []MatchRecord          `json:"match_history,omitempty"`
+	LastBXH                    string                 `json:"last_bxh,omitempty"`
 }
 
 // SummaryResult contains the parsed attendance details.
@@ -145,6 +204,12 @@ func (m *Manager) loadState() {
 			if s.GoingParticipants == nil {
 				s.GoingParticipants = make(map[string]Participant)
 			}
+			if s.MatchHistory == nil {
+				s.MatchHistory = make([]MatchRecord, 0)
+			}
+			if s.CurrentBill != nil && s.CurrentBill.Items == nil {
+				s.CurrentBill.Items = make(map[string]*BillItem)
+			}
 			for uid, uname := range s.ReactionsGoing {
 				if _, ok := s.GoingParticipants[uid]; !ok {
 					s.GoingParticipants[uid] = Participant{
@@ -158,7 +223,7 @@ func (m *Manager) loadState() {
 			m.log.Info("loaded badminton attendance state",
 				"session", s.SessionID, "messages", len(s.Messages),
 				"reactions_going", len(s.ReactionsGoing), "reactions_not_going", len(s.ReactionsNotGoing),
-				"participants", len(s.GoingParticipants))
+				"participants", len(s.GoingParticipants), "matches_history", len(s.MatchHistory))
 			return
 		}
 	}
@@ -167,6 +232,7 @@ func (m *Manager) loadState() {
 		ReactionsGoing:    make(map[string]string),
 		ReactionsNotGoing: make(map[string]string),
 		GoingParticipants: make(map[string]Participant),
+		MatchHistory:      make([]MatchRecord, 0),
 	}
 }
 
@@ -366,6 +432,25 @@ func (m *Manager) tick(ctx context.Context, now time.Time) {
 			}
 		}
 	}
+
+	// 3. Monthly Leaderboard: Last day of the month at 20:00
+	if now.AddDate(0, 0, 1).Day() == 1 && hour == 20 && minute == 0 {
+		monthKey := now.Format("2006-01")
+		m.mu.Lock()
+		alreadyBXH := m.state.LastBXH == monthKey
+		m.mu.Unlock()
+
+		if !alreadyBXH {
+			m.mu.Lock()
+			m.state.LastBXH = monthKey
+			m.saveStateLocked()
+			m.mu.Unlock()
+
+			if bxhText, err := m.GetLeaderboardText(now.Format("01/2006"), now); err == nil && bxhText != "" {
+				_, _ = m.sendWithRoleMention(ctx, bxhText)
+			}
+		}
+	}
 }
 
 // ExtractMatchTime parses messages to determine the confirmed booking time.
@@ -484,6 +569,33 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 		m.state.PreviousMatchParticipants = prev
 		m.state.PreviousMatchDate = m.state.MatchDate
 		m.state.PreviousMatchDay = m.state.MatchDay
+	}
+
+	// Archive completed match into MatchHistory
+	if m.state.MatchDate != "" && (len(prev) > 0 || len(m.state.ReactionsNotGoing) > 0) {
+		var absentees []string
+		for _, uname := range m.state.ReactionsNotGoing {
+			absentees = append(absentees, uname)
+		}
+		sort.Strings(absentees)
+
+		alreadyExists := false
+		for _, h := range m.state.MatchHistory {
+			if h.MatchDate == m.state.MatchDate {
+				alreadyExists = true
+				break
+			}
+		}
+		if !alreadyExists {
+			m.state.MatchHistory = append(m.state.MatchHistory, MatchRecord{
+				SessionID:   m.state.SessionID,
+				MatchDay:    m.state.MatchDay,
+				MatchDate:   m.state.MatchDate,
+				Attendees:   prev,
+				Absentees:   absentees,
+				CompletedAt: now,
+			})
+		}
 	}
 
 	m.state.SessionID = fmt.Sprintf("match-%s", matchDate)
@@ -1108,4 +1220,749 @@ func ParseMoneyAmount(raw string) (int, error) {
 	}
 
 	return val, nil
+}
+
+// DefaultShuttlePrice is 26,000 VND per shuttlecock as standard for Vinh-CL.
+const DefaultShuttlePrice = 26000
+
+var reMult = regexp.MustCompile(`(?i)^\s*(\d+(?:\.\d+)?k?)\s*[*xX]\s*(\d+(?:\.\d+)?k?)\s*(?:quả|qua|cầu|cau)?\s*$`)
+var reCauCount = regexp.MustCompile(`(?i)^\s*(\d+)\s*(?:quả|qua|cầu|cau|trái|trai)\s*(?:cầu|cau)?\s*$`)
+
+func cleanPart(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "sân")
+	s = strings.TrimPrefix(s, "san")
+	s = strings.TrimSuffix(s, "sân")
+	s = strings.TrimSuffix(s, "san")
+	return strings.TrimSpace(s)
+}
+
+func parseShuttlePart(raw string, isExplicitCau bool) (count int, price int64, fee int64, err error) {
+	s := strings.TrimSpace(raw)
+
+	// Check multiplication: e.g. 26*3, 26k*3, 3*26k, 3*26, 26.000 * 3
+	if m := reMult.FindStringSubmatch(raw); len(m) == 3 {
+		op1Str, op2Str := m[1], m[2]
+		var countVal int
+		var priceVal int64
+
+		hasK1 := strings.Contains(strings.ToLower(op1Str), "k")
+		hasK2 := strings.Contains(strings.ToLower(op2Str), "k")
+
+		if hasK1 && !hasK2 {
+			p, err := ParseMoneyAmount(op1Str)
+			if err != nil {
+				return 0, 0, 0, err
+			}
+			c, err := strconv.Atoi(op2Str)
+			if err != nil {
+				return 0, 0, 0, err
+			}
+			priceVal = int64(p)
+			countVal = c
+		} else if hasK2 && !hasK1 {
+			p, err := ParseMoneyAmount(op2Str)
+			if err != nil {
+				return 0, 0, 0, err
+			}
+			c, err := strconv.Atoi(op1Str)
+			if err != nil {
+				return 0, 0, 0, err
+			}
+			priceVal = int64(p)
+			countVal = c
+		} else {
+			// e.g. "26*3", "3*26", or "26.000*3"
+			p1, err1 := ParseMoneyAmount(op1Str)
+			p2, err2 := ParseMoneyAmount(op2Str)
+			if err1 == nil && err2 == nil {
+				if p1 > p2 {
+					priceVal = int64(p1)
+					countVal = p2 / 1000
+					if countVal == 0 {
+						countVal = p2
+					}
+				} else {
+					priceVal = int64(p2)
+					countVal = p1 / 1000
+					if countVal == 0 {
+						countVal = p1
+					}
+				}
+			} else {
+				v1, err1 := strconv.Atoi(strings.ReplaceAll(op1Str, ".", ""))
+				v2, err2 := strconv.Atoi(strings.ReplaceAll(op2Str, ".", ""))
+				if err1 != nil || err2 != nil {
+					return 0, 0, 0, fmt.Errorf("không hiểu phép nhân cầu: %q", raw)
+				}
+				if v1 < v2 {
+					countVal = v1
+					priceVal = int64(v2)
+				} else {
+					countVal = v2
+					priceVal = int64(v1)
+				}
+				if priceVal < 1000 {
+					priceVal *= 1000
+				}
+			}
+		}
+
+		return countVal, priceVal, int64(countVal) * priceVal, nil
+	}
+
+	// Check count only: e.g. "3 cau", "3 quả", "4 trái cầu"
+	if m := reCauCount.FindStringSubmatch(raw); len(m) == 2 {
+		c, err := strconv.Atoi(m[1])
+		if err == nil && c > 0 {
+			priceVal := int64(DefaultShuttlePrice)
+			return c, priceVal, int64(c) * priceVal, nil
+		}
+	}
+
+	// If explicit "cau" keyword was present in expression and part is a small number (1-30)
+	if isExplicitCau {
+		if c, err := strconv.Atoi(s); err == nil && c > 0 && c <= 30 {
+			priceVal := int64(DefaultShuttlePrice)
+			return c, priceVal, int64(c) * priceVal, nil
+		}
+	}
+
+	// Check direct money amount: e.g. "45k", "78000"
+	amt, err := ParseMoneyAmount(s)
+	if err == nil {
+		priceVal := int64(DefaultShuttlePrice)
+		if int64(amt)%priceVal == 0 {
+			countVal := int(int64(amt) / priceVal)
+			return countVal, priceVal, int64(amt), nil
+		}
+		return 0, 0, int64(amt), nil
+	}
+
+	return 0, 0, 0, fmt.Errorf("không hiểu số lượng/tiền cầu: %q", raw)
+}
+
+// ParseSplitFormula parses badminton split expressions:
+// e.g. "360k + 26*3", "360k + 26k*4 cau", "360k san 45k cau", "360k san 3 cau", "450k".
+func ParseSplitFormula(expr string) (*SplitBreakdown, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil, fmt.Errorf("vui lòng nhập chi phí, ví dụ: *split 360k + 26*3 hoặc *split 360k san 45k cau")
+	}
+
+	var courtStr string
+	var shuttleStr string
+	isExplicitCau := false
+
+	if strings.Contains(expr, "+") {
+		parts := strings.SplitN(expr, "+", 2)
+		courtStr = cleanPart(parts[0])
+		shuttleStr = strings.TrimSpace(parts[1])
+	} else {
+		reKeywords := regexp.MustCompile(`(?i)^(.+?)(?:\s*(?:sân|san))\s+(.+?)(?:\s*(?:cầu|cau))?$`)
+		if m := reKeywords.FindStringSubmatch(expr); len(m) == 3 {
+			courtStr = cleanPart(m[1])
+			shuttleStr = strings.TrimSpace(m[2])
+			if strings.Contains(strings.ToLower(expr), "cau") || strings.Contains(strings.ToLower(expr), "cầu") {
+				isExplicitCau = true
+			}
+		} else {
+			reEndCau := regexp.MustCompile(`(?i)^(.+?)\s+(\d+(?:[*xX]\d+)?\s*(?:cầu|cau|quả|qua)?)$`)
+			if m := reEndCau.FindStringSubmatch(expr); len(m) == 3 {
+				courtStr = cleanPart(m[1])
+				shuttleStr = strings.TrimSpace(m[2])
+				isExplicitCau = true
+			} else {
+				courtStr = cleanPart(expr)
+			}
+		}
+	}
+
+	courtFee, err := ParseMoneyAmount(courtStr)
+	if err != nil {
+		return nil, fmt.Errorf("tiền sân không hợp lệ (%s): %v", courtStr, err)
+	}
+
+	res := &SplitBreakdown{
+		CourtFee: int64(courtFee),
+	}
+
+	if shuttleStr != "" {
+		c, p, f, err := parseShuttlePart(shuttleStr, isExplicitCau)
+		if err != nil {
+			return nil, err
+		}
+		res.ShuttleCount = c
+		res.ShuttlePrice = p
+		res.ShuttleFee = f
+	}
+
+	res.TotalFee = res.CourtFee + res.ShuttleFee
+	return res, nil
+}
+
+// CreateSplitBill parses the split formula, fetches participants, rounds up slot price to 1,000 VND, and creates a BillSession.
+func (m *Manager) CreateSplitBill(expr string) (*BillSession, *SplitBreakdown, error) {
+	breakdown, err := ParseSplitFormula(expr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	matchDay, matchDate, participants := m.GetParticipantsForMoney()
+	if len(participants) == 0 {
+		return nil, nil, fmt.Errorf("chưa có danh sách người tham gia buổi đánh hôm trước để chia tiền")
+	}
+
+	totalSlots := 0
+	for _, p := range participants {
+		totalSlots += p.Slots
+	}
+	if totalSlots <= 0 {
+		totalSlots = len(participants)
+	}
+
+	// Round up slot price to the nearest 1,000 VND
+	slotPrice := int64(math.Ceil(float64(breakdown.TotalFee)/float64(totalSlots)/1000.0) * 1000)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	items := make(map[string]*BillItem)
+	for _, p := range participants {
+		userAmount := int64(p.Slots) * slotPrice
+		items[p.UserID] = &BillItem{
+			UserID:   p.UserID,
+			Username: p.Username,
+			Slots:    p.Slots,
+			Amount:   userAmount,
+			Paid:     false,
+		}
+	}
+
+	bill := &BillSession{
+		ID:           fmt.Sprintf("bill-%s", matchDate),
+		MatchDay:     matchDay,
+		MatchDate:    matchDate,
+		CourtFee:     breakdown.CourtFee,
+		ShuttleCount: breakdown.ShuttleCount,
+		ShuttlePrice: breakdown.ShuttlePrice,
+		ShuttleFee:   breakdown.ShuttleFee,
+		TotalAmount:  breakdown.TotalFee,
+		TotalSlots:   totalSlots,
+		SlotPrice:    slotPrice,
+		Items:        items,
+		CreatedAt:    time.Now().In(m.cfg.Timezone),
+	}
+
+	m.state.CurrentBill = bill
+	m.saveStateLocked()
+	return bill, breakdown, nil
+}
+
+// CreateMoneyBill creates a BillSession with a fixed per-slot price.
+func (m *Manager) CreateMoneyBill(unitAmount int) (*BillSession, error) {
+	if unitAmount <= 0 {
+		return nil, fmt.Errorf("số tiền mỗi slot không hợp lệ")
+	}
+
+	matchDay, matchDate, participants := m.GetParticipantsForMoney()
+	if len(participants) == 0 {
+		return nil, fmt.Errorf("chưa có danh sách người tham gia buổi đánh hôm trước để chia tiền")
+	}
+
+	totalSlots := 0
+	for _, p := range participants {
+		totalSlots += p.Slots
+	}
+	if totalSlots <= 0 {
+		totalSlots = len(participants)
+	}
+
+	slotPrice := int64(unitAmount)
+	totalAmount := slotPrice * int64(totalSlots)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	items := make(map[string]*BillItem)
+	for _, p := range participants {
+		userAmount := int64(p.Slots) * slotPrice
+		items[p.UserID] = &BillItem{
+			UserID:   p.UserID,
+			Username: p.Username,
+			Slots:    p.Slots,
+			Amount:   userAmount,
+			Paid:     false,
+		}
+	}
+
+	bill := &BillSession{
+		ID:          fmt.Sprintf("bill-%s", matchDate),
+		MatchDay:    matchDay,
+		MatchDate:   matchDate,
+		TotalAmount: totalAmount,
+		TotalSlots:  totalSlots,
+		SlotPrice:   slotPrice,
+		Items:       items,
+		CreatedAt:   time.Now().In(m.cfg.Timezone),
+	}
+
+	m.state.CurrentBill = bill
+	m.saveStateLocked()
+	return bill, nil
+}
+
+// SetCurrentBillMessageID associates the sent Mezon message ID with the active bill.
+func (m *Manager) SetCurrentBillMessageID(msgID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state.CurrentBill != nil {
+		m.state.CurrentBill.MessageID = msgID
+		m.saveStateLocked()
+	}
+}
+
+// IsCurrentBillMessage returns true if msgID matches the active bill's message ID.
+func (m *Manager) IsCurrentBillMessage(msgID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state.CurrentBill == nil || m.state.CurrentBill.MessageID == "" {
+		return false
+	}
+	return m.state.CurrentBill.MessageID == msgID
+}
+
+// MarkPaidByUserIDOrName marks a user as paid by their user ID or username.
+func (m *Manager) MarkPaidByUserIDOrName(userID, username string) (*BillItem, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
+		return nil, false
+	}
+
+	if item, ok := m.state.CurrentBill.Items[userID]; ok {
+		now := time.Now().In(m.cfg.Timezone)
+		item.Paid = true
+		item.PaidAt = &now
+		m.saveStateLocked()
+		return item, true
+	}
+
+	target := strings.ToLower(strings.TrimPrefix(username, "@"))
+	for _, item := range m.state.CurrentBill.Items {
+		uLower := strings.ToLower(strings.TrimPrefix(item.Username, "@"))
+		if uLower == target || item.UserID == target {
+			now := time.Now().In(m.cfg.Timezone)
+			item.Paid = true
+			item.PaidAt = &now
+			m.saveStateLocked()
+			return item, true
+		}
+	}
+
+	return nil, false
+}
+
+// MarkPaidBatch marks one or more members as paid.
+func (m *Manager) MarkPaidBatch(names []string) (paidItems []*BillItem, notFound []string, totalPaid int64, totalCost int64, paidCount int, totalCount int, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
+		return nil, nil, 0, 0, 0, 0, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
+	}
+
+	now := time.Now().In(m.cfg.Timezone)
+	for _, raw := range names {
+		clean := strings.ToLower(strings.TrimPrefix(raw, "@"))
+		clean = strings.TrimSpace(clean)
+		if clean == "" {
+			continue
+		}
+
+		var matched *BillItem
+		for _, item := range m.state.CurrentBill.Items {
+			if strings.ToLower(strings.TrimPrefix(item.Username, "@")) == clean || item.UserID == clean {
+				matched = item
+				break
+			}
+		}
+
+		if matched != nil {
+			matched.Paid = true
+			matched.PaidAt = &now
+			paidItems = append(paidItems, matched)
+		} else {
+			notFound = append(notFound, raw)
+		}
+	}
+
+	for _, item := range m.state.CurrentBill.Items {
+		totalCost += item.Amount
+		totalCount++
+		if item.Paid {
+			totalPaid += item.Amount
+			paidCount++
+		}
+	}
+
+	m.saveStateLocked()
+	return paidItems, notFound, totalPaid, totalCost, paidCount, totalCount, nil
+}
+
+// MarkUnpaidBatch marks one or more members as unpaid.
+func (m *Manager) MarkUnpaidBatch(names []string) (unmarked []*BillItem, notFound []string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
+		return nil, nil, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
+	}
+
+	for _, raw := range names {
+		clean := strings.ToLower(strings.TrimPrefix(raw, "@"))
+		clean = strings.TrimSpace(clean)
+		if clean == "" {
+			continue
+		}
+
+		var matched *BillItem
+		for _, item := range m.state.CurrentBill.Items {
+			if strings.ToLower(strings.TrimPrefix(item.Username, "@")) == clean || item.UserID == clean {
+				matched = item
+				break
+			}
+		}
+
+		if matched != nil {
+			matched.Paid = false
+			matched.PaidAt = nil
+			unmarked = append(unmarked, matched)
+		} else {
+			notFound = append(notFound, raw)
+		}
+	}
+
+	m.saveStateLocked()
+	return unmarked, notFound, nil
+}
+
+// GetBillStatus returns the active bill breakdown, paid list, and unpaid list.
+func (m *Manager) GetBillStatus() (bill *BillSession, paid []*BillItem, unpaid []*BillItem, totalPaid int64, totalCost int64, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
+		return nil, nil, nil, 0, 0, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
+	}
+
+	bill = m.state.CurrentBill
+	for _, item := range bill.Items {
+		totalCost += item.Amount
+		if item.Paid {
+			totalPaid += item.Amount
+			paid = append(paid, item)
+		} else {
+			unpaid = append(unpaid, item)
+		}
+	}
+
+	sort.Slice(paid, func(i, j int) bool {
+		return paid[i].Username < paid[j].Username
+	})
+	sort.Slice(unpaid, func(i, j int) bool {
+		return unpaid[i].Username < unpaid[j].Username
+	})
+
+	return bill, paid, unpaid, totalPaid, totalCost, nil
+}
+
+// GetUnpaidList returns all participants who have not paid yet.
+func (m *Manager) GetUnpaidList() (bill *BillSession, unpaid []*BillItem, totalUnpaid int64, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.state.CurrentBill == nil || len(m.state.CurrentBill.Items) == 0 {
+		return nil, nil, 0, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
+	}
+
+	bill = m.state.CurrentBill
+	for _, item := range bill.Items {
+		if !item.Paid {
+			totalUnpaid += item.Amount
+			unpaid = append(unpaid, item)
+		}
+	}
+
+	sort.Slice(unpaid, func(i, j int) bool {
+		return unpaid[i].Username < unpaid[j].Username
+	})
+
+	return bill, unpaid, totalUnpaid, nil
+}
+
+// ArchiveCurrentMatch archives current session attendance into MatchHistory if not already present.
+func (m *Manager) ArchiveCurrentMatch(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var prev []Participant
+	for _, p := range m.state.GoingParticipants {
+		prev = append(prev, p)
+	}
+	if len(prev) == 0 {
+		for uid, name := range m.state.ReactionsGoing {
+			prev = append(prev, Participant{UserID: uid, Username: name, Slots: 1})
+		}
+	}
+	if m.state.MatchDate != "" && (len(prev) > 0 || len(m.state.ReactionsNotGoing) > 0) {
+		var absentees []string
+		for _, uname := range m.state.ReactionsNotGoing {
+			absentees = append(absentees, uname)
+		}
+		sort.Strings(absentees)
+
+		for _, h := range m.state.MatchHistory {
+			if h.MatchDate == m.state.MatchDate {
+				return
+			}
+		}
+
+		m.state.MatchHistory = append(m.state.MatchHistory, MatchRecord{
+			SessionID:   m.state.SessionID,
+			MatchDay:    m.state.MatchDay,
+			MatchDate:   m.state.MatchDate,
+			Attendees:   prev,
+			Absentees:   absentees,
+			CompletedAt: now,
+		})
+		m.saveStateLocked()
+	}
+}
+
+func parseTargetMonthYear(raw string, now time.Time) (month int, year int, label string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return int(now.Month()), now.Year(), fmt.Sprintf("%02d/%04d", now.Month(), now.Year()), nil
+	}
+	if strings.Contains(raw, "/") {
+		parts := strings.Split(raw, "/")
+		if len(parts) == 2 {
+			m, err1 := strconv.Atoi(parts[0])
+			y, err2 := strconv.Atoi(parts[1])
+			if err1 == nil && err2 == nil && m >= 1 && m <= 12 {
+				if y < 100 {
+					y += 2000
+				}
+				return m, y, fmt.Sprintf("%02d/%04d", m, y), nil
+			}
+		}
+	} else if strings.Contains(raw, "-") {
+		parts := strings.Split(raw, "-")
+		if len(parts) == 2 {
+			if len(parts[0]) == 4 {
+				y, err1 := strconv.Atoi(parts[0])
+				m, err2 := strconv.Atoi(parts[1])
+				if err1 == nil && err2 == nil && m >= 1 && m <= 12 {
+					return m, y, fmt.Sprintf("%02d/%04d", m, y), nil
+				}
+			} else {
+				m, err1 := strconv.Atoi(parts[0])
+				y, err2 := strconv.Atoi(parts[1])
+				if err1 == nil && err2 == nil && m >= 1 && m <= 12 {
+					return m, y, fmt.Sprintf("%02d/%04d", m, y), nil
+				}
+			}
+		}
+	} else {
+		m, err := strconv.Atoi(raw)
+		if err == nil && m >= 1 && m <= 12 {
+			return m, now.Year(), fmt.Sprintf("%02d/%04d", m, now.Year()), nil
+		}
+	}
+	return 0, 0, "", fmt.Errorf("định dạng tháng không hợp lệ (ví dụ: `*bxh` hoặc `*bxh 11/2026`)")
+}
+
+// GetLeaderboardText generates the formatted leaderboard for the specified month/year.
+func (m *Manager) GetLeaderboardText(monthInput string, now time.Time) (string, error) {
+	month, year, label, err := parseTargetMonthYear(monthInput, now)
+	if err != nil {
+		return "", err
+	}
+
+	m.mu.Lock()
+	records := append([]MatchRecord(nil), m.state.MatchHistory...)
+	var currentAttendees []Participant
+	for _, p := range m.state.GoingParticipants {
+		currentAttendees = append(currentAttendees, p)
+	}
+	if len(currentAttendees) == 0 {
+		for uid, name := range m.state.ReactionsGoing {
+			currentAttendees = append(currentAttendees, Participant{UserID: uid, Username: name, Slots: 1})
+		}
+	}
+	currentDate := m.state.MatchDate
+	currentDay := m.state.MatchDay
+	var currentAbsentees []string
+	for _, u := range m.state.ReactionsNotGoing {
+		currentAbsentees = append(currentAbsentees, u)
+	}
+	m.mu.Unlock()
+
+	// If current session date matches target month and is not in records, include it
+	if currentDate != "" && (len(currentAttendees) > 0 || len(currentAbsentees) > 0) {
+		already := false
+		for _, r := range records {
+			if r.MatchDate == currentDate {
+				already = true
+				break
+			}
+		}
+		if !already {
+			records = append(records, MatchRecord{
+				SessionID:   "current",
+				MatchDay:    currentDay,
+				MatchDate:   currentDate,
+				Attendees:   currentAttendees,
+				Absentees:   currentAbsentees,
+				CompletedAt: now,
+			})
+		}
+	}
+
+	var monthMatches []MatchRecord
+	for _, r := range records {
+		parts := strings.Split(r.MatchDate, "/")
+		if len(parts) == 3 {
+			mVal, _ := strconv.Atoi(parts[1])
+			yVal, _ := strconv.Atoi(parts[2])
+			if mVal == month && yVal == year {
+				monthMatches = append(monthMatches, r)
+			}
+		}
+	}
+
+	if len(monthMatches) == 0 {
+		return fmt.Sprintf("⚠️ Chưa có dữ liệu buổi đánh cầu nào trong tháng **%s**!", label), nil
+	}
+
+	type statsHolder struct {
+		username    string
+		matches     int
+		slots       int
+		absentCount int
+	}
+
+	statsMap := make(map[string]*statsHolder)
+	getStats := func(uname string) *statsHolder {
+		key := strings.ToLower(uname)
+		if s, ok := statsMap[key]; ok {
+			return s
+		}
+		s := &statsHolder{username: uname}
+		statsMap[key] = s
+		return s
+	}
+
+	totalMatches := len(monthMatches)
+	for _, match := range monthMatches {
+		for _, att := range match.Attendees {
+			s := getStats(att.Username)
+			s.matches++
+			s.slots += att.Slots
+		}
+		for _, abs := range match.Absentees {
+			s := getStats(abs)
+			s.absentCount++
+		}
+	}
+
+	var goingList []*statsHolder
+	var absentList []*statsHolder
+	for _, s := range statsMap {
+		if s.matches > 0 {
+			goingList = append(goingList, s)
+		}
+		if s.absentCount > 0 {
+			absentList = append(absentList, s)
+		}
+	}
+
+	sort.Slice(goingList, func(i, j int) bool {
+		if goingList[i].matches != goingList[j].matches {
+			return goingList[i].matches > goingList[j].matches
+		}
+		if goingList[i].slots != goingList[j].slots {
+			return goingList[i].slots > goingList[j].slots
+		}
+		return goingList[i].username < goingList[j].username
+	})
+
+	sort.Slice(absentList, func(i, j int) bool {
+		if absentList[i].absentCount != absentList[j].absentCount {
+			return absentList[i].absentCount > absentList[j].absentCount
+		}
+		return absentList[i].username < absentList[j].username
+	})
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🏆 **[BẢNG XẾP HẠNG CẦU LÔNG - THÁNG %s]** 🏸\n\n", label))
+	sb.WriteString(fmt.Sprintf("📅 Tổng số buổi đã tổ chức: **%d buổi**\n\n", totalMatches))
+
+	// Section 1: Top Chăm chỉ
+	sb.WriteString("🌟 **BẢNG VÀNG CHĂM CHỈ (CHIẾN THẦN QUẬT CẦU):**\n")
+	if len(goingList) == 0 {
+		sb.WriteString("• Chưa có ai tham gia buổi nào trong tháng.\n")
+	} else {
+		for idx, s := range goingList {
+			rate := (float64(s.matches) / float64(totalMatches)) * 100.0
+			slotInfo := fmt.Sprintf("%d slot", s.slots)
+			rateInfo := fmt.Sprintf("%.0f%%", rate)
+
+			switch idx {
+			case 0:
+				sb.WriteString(fmt.Sprintf("1. 👑 **@%s**: %d/%d buổi (%s • %s) - *👑 Chiến thần quật cầu*\n",
+					s.username, s.matches, totalMatches, rateInfo, slotInfo))
+			case 1:
+				sb.WriteString(fmt.Sprintf("2. 🥈 **@%s**: %d/%d buổi (%s • %s)\n",
+					s.username, s.matches, totalMatches, rateInfo, slotInfo))
+			case 2:
+				sb.WriteString(fmt.Sprintf("3. 🥉 **@%s**: %d/%d buổi (%s • %s)\n",
+					s.username, s.matches, totalMatches, rateInfo, slotInfo))
+			default:
+				if idx < 10 {
+					sb.WriteString(fmt.Sprintf("• **@%s**: %d/%d buổi (%s • %s)\n",
+						s.username, s.matches, totalMatches, rateInfo, slotInfo))
+				}
+			}
+		}
+	}
+
+	sb.WriteString("\n")
+
+	// Section 2: Top Chúa sủi
+	sb.WriteString("🍗 **BẢNG PHONG THẦN \"CHÚA SỦI\" CỦA THÁNG:**\n")
+	if len(absentList) == 0 {
+		sb.WriteString("🎉 *Tháng này không ai xin off buổi nào! Tinh thần thể thao của anh em quá tuyệt vời!* 🔥\n")
+	} else {
+		for idx, s := range absentList {
+			switch idx {
+			case 0:
+				sb.WriteString(fmt.Sprintf("1. 🍗 **@%s**: **%d lần** báo bận/off - *🍗 Chúa sủi của tháng*\n",
+					s.username, s.absentCount))
+			case 1:
+				sb.WriteString(fmt.Sprintf("2. 🦥 **@%s**: **%d lần** báo bận/off\n",
+					s.username, s.absentCount))
+			default:
+				if idx < 5 {
+					sb.WriteString(fmt.Sprintf("• **@%s**: %d lần báo bận/off\n",
+						s.username, s.absentCount))
+				}
+			}
+		}
+	}
+
+	sb.WriteString("\n💪 *Chúc toàn thể anh em Vinh-CL luôn giữ vững phong độ và đam mê quật cầu thật cháy nhé!* 🔥🏸")
+	return sb.String(), nil
 }
