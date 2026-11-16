@@ -16,15 +16,15 @@ sudo mkdir -p "${INSTALL_DIR}"
 # 2. Copy binary and assets
 if [ -f "bin/fundbot-linux-amd64" ]; then
     echo "Installing pre-built Linux binary..."
-    sudo cp "bin/fundbot-linux-amd64" "${INSTALL_DIR}/fundbot"
+    sudo install -m 755 "bin/fundbot-linux-amd64" "${INSTALL_DIR}/fundbot"
 elif [ -f "bin/fundbot" ]; then
     echo "Installing bin/fundbot..."
-    sudo cp "bin/fundbot" "${INSTALL_DIR}/fundbot"
+    sudo install -m 755 "bin/fundbot" "${INSTALL_DIR}/fundbot"
 else
     echo "Building binary locally..."
-    go build -o "${INSTALL_DIR}/fundbot" ./cmd/fundbot
+    go build -o bin/fundbot ./cmd/fundbot
+    sudo install -m 755 bin/fundbot "${INSTALL_DIR}/fundbot"
 fi
-sudo chmod +x "${INSTALL_DIR}/fundbot"
 
 # Copy wallets mapping if present
 if [ -f "wallets.json" ]; then

@@ -203,3 +203,18 @@ If you prefer configuring manually:
    - Restart bot: `sudo systemctl restart fundbot`
    - Stop bot: `sudo systemctl stop fundbot`
 
+### 4. Updating the Bot on Server
+
+To update the running bot without encountering `Text file busy` errors:
+```bash
+git pull origin main
+make build-linux
+
+# Use install to safely replace the active executable inode:
+sudo install -m 755 bin/fundbot-linux-amd64 bin/fundbot
+# (Hoặc nếu deploy tại /opt/fundbot: sudo install -m 755 bin/fundbot-linux-amd64 /opt/fundbot/fundbot)
+
+sudo systemctl restart fundbot
+sudo journalctl -u fundbot -f
+```
+
