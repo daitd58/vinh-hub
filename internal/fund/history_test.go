@@ -216,6 +216,28 @@ func TestResolveTxUser(t *testing.T) {
 	if in5 || u5 != "hoang.nguyen" || c5 != "hoàn tiền" {
 		t.Errorf("Case 5 failed: u=%s, c=%s, in=%v", u5, c5, in5)
 	}
+
+	// Case 6: Direct transfer with default Mezon "Transfer funds - ..." prefix
+	tx6 := TxRecord{
+		FromAddress: "2aB3cDeFgHiJkLmNoPqRsTuVwXyZ1234567890abcdef",
+		ToAddress:   fundWallet,
+		TextData:    "Transfer funds - 6 custar, 2 chocopie",
+	}
+	u6, c6, in6 := ResolveTxUser(tx6, fundWallet, wMap)
+	if !in6 || u6 != "hoang.nguyen" || c6 != "6 custar, 2 chocopie" {
+		t.Errorf("Case 6 failed: u=%s, c=%s, in=%v", u6, c6, in6)
+	}
+
+	// Case 7: Bot forward with "Transfer funds - ..." inside content
+	tx7 := TxRecord{
+		FromAddress: "4N1mKjV2L2H22P88H6N8x8H71r5hG6z3N5f2C1y9Q4b1",
+		ToAddress:   fundWallet,
+		TextData:    "chinh.nguyenduc transfer via bot: Transfer funds - 1 nutriboost",
+	}
+	u7, c7, in7 := ResolveTxUser(tx7, fundWallet, wMap)
+	if !in7 || u7 != "chinh.nguyenduc" || c7 != "1 nutriboost" {
+		t.Errorf("Case 7 failed: u=%s, c=%s, in=%v", u7, c7, in7)
+	}
 }
 
 func TestFormatRecentHistory(t *testing.T) {

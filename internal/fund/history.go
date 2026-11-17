@@ -168,6 +168,18 @@ func (i *Indexer) MonthlyTransactions(ctx context.Context, wallet string, year i
 	return allTxs, nil
 }
 
+func cleanTransferContent(s string) string {
+	s = strings.TrimSpace(s)
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "transfer funds - ") {
+		return strings.TrimSpace(s[len("transfer funds - "):])
+	}
+	if lower == "transfer funds" {
+		return ""
+	}
+	return s
+}
+
 // ResolveTxUser determines the display username or address, and clean content for a transaction.
 func ResolveTxUser(tx TxRecord, fundWallet string, wMap *UserWalletMap) (user string, content string, isIncoming bool) {
 	isIncoming = strings.EqualFold(tx.ToAddress, fundWallet)
@@ -177,19 +189,26 @@ func ResolveTxUser(tx TxRecord, fundWallet string, wMap *UserWalletMap) (user st
 		if strings.Contains(text, " transfer via bot: ") {
 			parts := strings.SplitN(text, " transfer via bot: ", 2)
 			user = strings.TrimSpace(parts[0])
-			content = strings.TrimSpace(parts[1])
+			content = cleanTransferContent(parts[1])
 		} else if strings.Contains(text, " - ") {
 			parts := strings.SplitN(text, " - ", 2)
 			candidate := strings.TrimSpace(parts[0])
-			if wMap != nil {
-				if _, ok := wMap.LookupWallet(candidate); ok {
+			if !strings.EqualFold(candidate, "transfer funds") {
+				if wMap != nil {
+					if _, ok := wMap.LookupWallet(candidate); ok {
+						user = candidate
+						content = strings.TrimSpace(parts[1])
+					} else if u, ok := wMap.LookupUser(tx.FromAddress); ok {
+						user = u
+						content = strings.TrimSpace(parts[1])
+					}
+				}
+				if user == "" {
 					user = candidate
 					content = strings.TrimSpace(parts[1])
 				}
-			}
-			if user == "" {
-				user = candidate
-				content = strings.TrimSpace(parts[1])
+			} else {
+				content = cleanTransferContent(parts[1])
 			}
 		}
 
@@ -206,7 +225,7 @@ func ResolveTxUser(tx TxRecord, fundWallet string, wMap *UserWalletMap) (user st
 			}
 		}
 		if content == "" {
-			content = text
+			content = cleanTransferContent(text)
 		}
 	} else {
 		// Outgoing
