@@ -4,10 +4,7 @@ import (
 	"testing"
 	"time"
 
-	mezon "github.com/quangledang23/mezon-sdk-go"
-
 	"vinh-hub/internal/fund"
-	"vinh-hub/internal/sport"
 )
 
 func TestFormatBalanceReport(t *testing.T) {
@@ -168,44 +165,3 @@ func TestParseMonthYear(t *testing.T) {
 		}
 	}
 }
-
-func TestHandlePaidCommand_SelfConfirm(t *testing.T) {
-	stateFile := t.TempDir() + "/badminton.json"
-	mgr := sport.NewManager(sport.Config{
-		StatePath: stateFile,
-	}, nil)
-
-	// Create a bill with 2 participants
-	p1 := sport.Participant{UserID: "uid1", Username: "user1", Slots: 1}
-	p2 := sport.Participant{UserID: "uid2", Username: "user2", Slots: 1}
-	bill, _, err := mgr.CreateSplitBill("360k", p1, p2)
-	if err != nil {
-		t.Fatalf("CreateSplitBill failed: %v", err)
-	}
-
-	b := &Bot{
-		sportMgr: mgr,
-	}
-
-	// user1 types "*paid 1" -> should self-confirm user1 on bill 1
-	msg := &mezon.ChannelMessage{
-		ChannelID: "chan1",
-		SenderID:  "uid1",
-		Username:  "user1",
-	}
-	b.handlePaidCommand(msg, "*paid 1")
-
-	// Verify user1 is marked as paid
-	b1, _, _, _, _, err := mgr.GetBillStatus(bill.ID)
-	if err != nil {
-		t.Fatalf("GetBillStatus failed: %v", err)
-	}
-
-	if item := b1.Items["uid1"]; item == nil || !item.Paid {
-		t.Errorf("expected user1 to be self-confirmed as paid on bill 1, got item: %v", item)
-	}
-	if item := b1.Items["uid2"]; item == nil || item.Paid {
-		t.Errorf("expected user2 to remain unpaid, got item: %v", item)
-	}
-}
-

@@ -213,9 +213,6 @@ func (b *Bot) SetVinhHubManager(mgr *vinhhub.Manager) {
 // SendToChannel sends a message with optional mentions directly to a channel,
 // converting markdown bold tags (**) into Mezon `mk` spans and ensuring role mentions are highlighted.
 func (b *Bot) SendToChannel(ctx context.Context, channelID string, text string, opts *mezon.SendOptions) (string, error) {
-	if b == nil || b.client == nil {
-		return "", fmt.Errorf("bot client is not connected")
-	}
 	ch, err := b.client.Channels.Fetch(channelID)
 	if err != nil {
 		return "", fmt.Errorf("fetch channel %s: %w", channelID, err)
@@ -468,9 +465,6 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 
 // SendToThread sends a message to a thread or fallback channel.
 func (b *Bot) SendToThread(ctx context.Context, channelID, threadID, text string) error {
-	if b == nil || b.client == nil {
-		return fmt.Errorf("bot client is not connected")
-	}
 	b.mu.RLock()
 	if threadID == "" {
 		threadID = b.threadID
@@ -1387,39 +1381,11 @@ func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
 		return
 	}
 
-	// No user args specified -> check if the sender themselves is an unpaid participant on this bill
+	// No args or bill-filter arg -> Show payment dashboard
 	bill, paid, unpaid, totalPaid, totalCost, err := sportMgr.GetBillStatus(filter)
 	if err != nil {
 		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
 		return
-	}
-
-	if bill != nil {
-		senderIdentifier := m.Username
-		if senderIdentifier == "" {
-			senderIdentifier = m.SenderID
-		}
-		sLower := strings.ToLower(strings.TrimPrefix(m.Username, "@"))
-
-		for _, item := range bill.Items {
-			uLower := strings.ToLower(strings.TrimPrefix(item.Username, "@"))
-			dLower := strings.ToLower(strings.TrimPrefix(item.DisplayName, "@"))
-			if (item.UserID == m.SenderID || (sLower != "" && (uLower == sLower || dLower == sLower))) && !item.Paid {
-				paidBatch, _, newTotalPaid, newTotalCost, newPaidCount, newTotalCount, err := sportMgr.MarkPaidBatch([]string{senderIdentifier}, filter)
-				if err == nil && len(paidBatch) > 0 {
-					code := bill.BillCode
-					if code == "" {
-						code = fmt.Sprintf("CL%d", bill.BillNumber)
-					}
-					var sb strings.Builder
-					sb.WriteString(fmt.Sprintf("✅ **Đã ghi nhận đóng tiền:** @%s (Hoá đơn: %s) 💵\n\n", item.Username, code))
-					sb.WriteString(fmt.Sprintf("📊 **Tiến độ thu tiền:** %d/%d người (%s / %s VNĐ)",
-						newPaidCount, newTotalCount, fund.FormatVND(newTotalPaid), fund.FormatVND(newTotalCost)))
-					_ = b.reply(m, sb.String())
-					return
-				}
-			}
-		}
 	}
 
 	_ = b.reply(m, formatBillDashboard(bill, paid, unpaid, totalPaid, totalCost))
