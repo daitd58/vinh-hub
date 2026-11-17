@@ -1,0 +1,404 @@
+package mezon
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/quangledang23/mezon-sdk-go/api"
+	"github.com/quangledang23/mezon-sdk-go/rtapi"
+	"google.golang.org/protobuf/proto"
+)
+
+// isMustJoinChannelError reports whether err is the server's "must join channel
+// before sending messages" rejection (code 3), port of
+// socket_manager.isMustJoinChannelError. The socket surfaces the code and
+// message inside the error string, so we match on the message substring.
+func isMustJoinChannelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "error 3:") ||
+		strings.Contains(msg, "Must join channel before sending messages")
+}
+
+// getChannelTypeFromMode maps a stream mode to the channel type used when
+// (re)joining a channel, port of socket_manager.getChannelTypeFromMode.
+func getChannelTypeFromMode(mode int) int {
+	switch ChannelStreamMode(mode) {
+	case StreamModeDM:
+		return int(ChannelTypeDM)
+	case StreamModeGroup:
+		return int(ChannelTypeGroup)
+	case StreamModeThread:
+		return int(ChannelTypeThread)
+	default:
+		return int(ChannelTypeChannel)
+	}
+}
+
+// joinChannelBeforeRetry joins the target channel so a subsequent write
+// succeeds, port of socket_manager.joinChannelBeforeRetry. channelType falls
+// back to getChannelTypeFromMode(mode) when unset.
+func (s *DefaultSocket) joinChannelBeforeRetry(clanID, channelID string, channelType, mode int, isPublic bool) error {
+	if channelType == 0 {
+		channelType = getChannelTypeFromMode(mode)
+	}
+	_, err := s.JoinChat(clanID, channelID, channelType, isPublic)
+	return err
+}
+
+// WriteChatMessage sends a chat message, port of socket.writeChatMessage (with
+// the content-length guard from socket_manager.writeChatMessage). Content is
+// JSON-serialized and its length validated in UTF-16 code units.
+func (s *DefaultSocket) WriteChatMessage(d ReplyMessageData) (*rtapi.ChannelMessageAck, error) {
+	content, err := marshalContent(d.Content)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateContentLength(content); err != nil {
+		return nil, err
+	}
+	send := func() (*rtapi.ChannelMessageAck, error) {
+		env := &rtapi.Envelope{ChannelMessageSend: &rtapi.ChannelMessageSend{
+			ClanId:           atoiID(d.ClanID),
+			ChannelId:        atoiID(d.ChannelID),
+			Mode:             int32(d.Mode),
+			IsPublic:         d.IsPublic,
+			Content:          content,
+			Mentions:         mentionsToProto(d.Mentions),
+			Attachments:      attachmentsToProto(d.Attachments),
+			References:       refsToProto(d.References),
+			AnonymousMessage: d.AnonymousMessage,
+			MentionEveryone:  d.MentionEveryone,
+			Avatar:           d.Avatar,
+			Code:             int32(d.Code),
+			TopicId:          atoiID(d.TopicID),
+		}}
+		resp, err := s.send(env, 0)
+		if err != nil {
+			return nil, err
+		}
+		return resp.ChannelMessageAck, nil
+	}
+	// Retry once after joining the channel if the server rejects the write with
+	// "must join channel", port of socket_manager.writeChatMessage. A failed
+	// auto-join (e.g. the bot is not a member of a private channel) surfaces
+	// alongside the original rejection instead of being swallowed — the TS
+	// SDK likewise propagates the join error.
+	ack, err := send()
+	if err != nil && isMustJoinChannelError(err) {
+		if jerr := s.joinChannelBeforeRetry(d.ClanID, d.ChannelID, d.ChannelType, d.Mode, d.IsPublic); jerr != nil {
+			return nil, fmt.Errorf("%w (auto-join failed: %v)", err, jerr)
+		}
+		return send()
+	}
+	return ack, err
+}
+
+// WriteEphemeralMessage sends an ephemeral message visible only to receivers,
+// port of socket.writeEphemeralMessage.
+func (s *DefaultSocket) WriteEphemeralMessage(d EphemeralMessageData) (*api.ChannelMessage, error) {
+	content, err := marshalContent(d.Content)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateContentLength(content); err != nil {
+		return nil, err
+	}
+	receivers := make([]int64, 0, len(d.ReceiverIDs))
+	for _, r := range d.ReceiverIDs {
+		receivers = append(receivers, atoiID(r))
+	}
+	send := func() (*api.ChannelMessage, error) {
+		env := &rtapi.Envelope{EphemeralMessageSend: &rtapi.EphemeralMessageSend{
+			ReceiverIds: receivers,
+			Message: &rtapi.ChannelMessageSend{
+				ClanId:           atoiID(d.ClanID),
+				ChannelId:        atoiID(d.ChannelID),
+				Mode:             int32(d.Mode),
+				IsPublic:         d.IsPublic,
+				Content:          content,
+				Mentions:         mentionsToProto(d.Mentions),
+				Attachments:      attachmentsToProto(d.Attachments),
+				References:       refsToProto(d.References),
+				AnonymousMessage: d.AnonymousMessage,
+				MentionEveryone:  d.MentionEveryone,
+				Avatar:           d.Avatar,
+				Code:             int32(d.Code),
+				TopicId:          atoiID(d.TopicID),
+				Id:               atoiID(d.MessageID),
+			},
+		}}
+		resp, err := s.send(env, 0)
+		if err != nil {
+			return nil, err
+		}
+		return resp.ChannelMessage, nil
+	}
+	// Retry once after joining the channel if the server rejects the write with
+	// "must join channel", port of socket_manager.writeEphemeralMessage. A
+	// failed auto-join surfaces alongside the original rejection (see
+	// WriteChatMessage).
+	msg, err := send()
+	if err != nil && isMustJoinChannelError(err) {
+		if jerr := s.joinChannelBeforeRetry(d.ClanID, d.ChannelID, d.ChannelType, d.Mode, d.IsPublic); jerr != nil {
+			return nil, fmt.Errorf("%w (auto-join failed: %v)", err, jerr)
+		}
+		return send()
+	}
+	return msg, err
+}
+
+// UpdateChannelMessage edits a previously sent message via an API request over
+// the socket, port of socket.updateChannelMessage (which replaced
+// updateChatMessage as the path used by socket_manager in mezon-js v2.8.50).
+func (s *DefaultSocket) UpdateChannelMessage(d UpdateMessageData) (*rtapi.ChannelMessageAck, error) {
+	content, err := marshalContent(d.Content)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateContentLength(content); err != nil {
+		return nil, err
+	}
+	body, err := proto.Marshal(&rtapi.ChannelMessageUpdate{
+		ClanId:            atoiID(d.ClanID),
+		ChannelId:         atoiID(d.ChannelID),
+		MessageId:         atoiID(d.MessageID),
+		Content:           content,
+		Mentions:          mentionsToProto(d.Mentions),
+		Attachments:       attachmentsToProto(d.Attachments),
+		Mode:              int32(d.Mode),
+		IsPublic:          d.IsPublic,
+		HideEditted:       d.HideEditted,
+		TopicId:           atoiID(d.TopicID),
+		IsUpdateMsgTopic:  d.IsUpdateMsgTopic,
+		CreateTimeSeconds: d.CreateTimeSeconds,
+	})
+	if err != nil {
+		return nil, err
+	}
+	apiIndex, ok := apiIndexFromName("UpdateChannelMessage")
+	if !ok {
+		return nil, fmt.Errorf("mezon: unknown API %q", "UpdateChannelMessage")
+	}
+	// Large edits take the server noticeably longer to acknowledge; the TS
+	// widens the wait to 30s past 1500 encoded bytes.
+	timeout := time.Duration(0)
+	if len(body) > largeUpdateBodyBytes {
+		timeout = largeUpdateTimeout
+	}
+	resp, err := s.sendResponse(&rtapi.Envelope{ApiRequestEvent: &rtapi.ApiRequestEvent{
+		ApiIndex: apiIndex,
+		ApiName:  "UpdateChannelMessage",
+		Body:     body,
+	}}, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if resp.apiResponse && resp.code != 0 {
+		return nil, fmt.Errorf("mezon: API UpdateChannelMessage failed with code %d", resp.code)
+	}
+	return ackFromUpdateResponse(resp, atoiID(d.ChannelID), atoiID(d.MessageID))
+}
+
+const (
+	// largeUpdateBodyBytes is the encoded ChannelMessageUpdate size past which
+	// UpdateChannelMessage waits largeUpdateTimeout instead of the default.
+	largeUpdateBodyBytes = 1500
+	largeUpdateTimeout   = 30 * time.Second
+)
+
+// ackFromUpdateResponse normalizes the three shapes the server answers an
+// edit with, port of MezonTransport.ackFromUpdateResponse: the raw API body
+// (an echoed ChannelMessageUpdate), a channel_message_ack envelope, or the
+// pushed channel_message itself (matched to this request by message id, see
+// resolvePendingUpdate). channelID/messageID from the request win over the
+// response's when non-zero, as in the TS.
+func ackFromUpdateResponse(resp *socketResponse, channelID, messageID int64) (*rtapi.ChannelMessageAck, error) {
+	pick := func(req, got int64) int64 {
+		if req != 0 {
+			return req
+		}
+		return got
+	}
+	if resp.apiResponse {
+		updated := &rtapi.ChannelMessageUpdate{}
+		body := resp.body
+		if err := proto.Unmarshal(body[:protoMessageLength(body)], updated); err != nil {
+			return nil, err
+		}
+		return &rtapi.ChannelMessageAck{
+			ChannelId:         pick(channelID, updated.ChannelId),
+			MessageId:         pick(messageID, updated.MessageId),
+			CreateTimeSeconds: updated.CreateTimeSeconds,
+			Code:              1,
+		}, nil
+	}
+	env := resp.env
+	if env == nil {
+		return &rtapi.ChannelMessageAck{ChannelId: channelID, MessageId: messageID, Code: 1}, nil
+	}
+	if env.ChannelMessageAck != nil {
+		return env.ChannelMessageAck, nil
+	}
+	if pushed := env.ChannelMessage; pushed != nil {
+		code := pushed.Code
+		if code == 0 {
+			code = 1
+		}
+		return &rtapi.ChannelMessageAck{
+			ChannelId:         pick(pushed.ChannelId, channelID),
+			MessageId:         pick(pushed.MessageId, messageID),
+			CreateTimeSeconds: pushed.CreateTimeSeconds,
+			UpdateTimeSeconds: pushed.UpdateTimeSeconds,
+			Code:              code,
+		}, nil
+	}
+	return &rtapi.ChannelMessageAck{ChannelId: channelID, MessageId: messageID, Code: 1}, nil
+}
+
+// DeleteChannelMessage deletes a message via an API request over the socket,
+// port of socket.deleteChannelMessage (which replaced removeChatMessage as the
+// path used by socket_manager in mezon-js v2.8.50).
+func (s *DefaultSocket) DeleteChannelMessage(d RemoveMessageData) (*rtapi.ChannelMessageAck, error) {
+	body, err := proto.Marshal(&rtapi.ChannelMessageRemove{
+		ClanId:        atoiID(d.ClanID),
+		ChannelId:     atoiID(d.ChannelID),
+		MessageId:     atoiID(d.MessageID),
+		Mode:          int32(d.Mode),
+		IsPublic:      d.IsPublic,
+		HasAttachment: d.HasAttachment,
+		TopicId:       atoiID(d.TopicID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := s.sendApiRequest("DeleteChannelMessage", body)
+	if err != nil {
+		return nil, err
+	}
+	removed := &rtapi.ChannelMessageRemove{}
+	if err := proto.Unmarshal(respBody, removed); err != nil {
+		return nil, err
+	}
+	ack := &rtapi.ChannelMessageAck{
+		ChannelId: atoiID(d.ChannelID),
+		MessageId: atoiID(d.MessageID),
+		Code:      2,
+	}
+	if ack.ChannelId == 0 {
+		ack.ChannelId = removed.ChannelId
+	}
+	if ack.MessageId == 0 {
+		ack.MessageId = removed.MessageId
+	}
+	return ack, nil
+}
+
+// UpdateChatMessage edits a previously sent message, port of socket.updateChatMessage.
+func (s *DefaultSocket) UpdateChatMessage(d UpdateMessageData) (*rtapi.ChannelMessageAck, error) {
+	content, err := marshalContent(d.Content)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateContentLength(content); err != nil {
+		return nil, err
+	}
+	env := &rtapi.Envelope{ChannelMessageUpdate: &rtapi.ChannelMessageUpdate{
+		ClanId:            atoiID(d.ClanID),
+		ChannelId:         atoiID(d.ChannelID),
+		MessageId:         atoiID(d.MessageID),
+		Content:           content,
+		Mentions:          mentionsToProto(d.Mentions),
+		Attachments:       attachmentsToProto(d.Attachments),
+		Mode:              int32(d.Mode),
+		IsPublic:          d.IsPublic,
+		HideEditted:       d.HideEditted,
+		TopicId:           atoiID(d.TopicID),
+		IsUpdateMsgTopic:  d.IsUpdateMsgTopic,
+		CreateTimeSeconds: d.CreateTimeSeconds,
+	}}
+	resp, err := s.sendResponse(env, 0)
+	if err != nil {
+		return nil, err
+	}
+	return ackFromUpdateResponse(resp, atoiID(d.ChannelID), atoiID(d.MessageID))
+}
+
+// WriteMessageReaction adds or removes a reaction, port of socket.writeMessageReaction.
+func (s *DefaultSocket) WriteMessageReaction(d ReactMessageData) (*api.MessageReaction, error) {
+	env := &rtapi.Envelope{MessageReactionEvent: &api.MessageReaction{
+		Id:              atoiID(d.ID),
+		ClanId:          atoiID(d.ClanID),
+		ChannelId:       atoiID(d.ChannelID),
+		Mode:            int32(d.Mode),
+		IsPublic:        d.IsPublic,
+		MessageId:       atoiID(d.MessageID),
+		EmojiId:         atoiID(d.EmojiID),
+		Emoji:           d.Emoji,
+		Count:           int32(d.Count),
+		MessageSenderId: atoiID(d.MessageSenderID),
+		Action:          d.ActionDelete,
+	}}
+	resp, err := s.send(env, 0)
+	if err != nil {
+		return nil, err
+	}
+	return resp.MessageReactionEvent, nil
+}
+
+// RemoveChatMessage deletes a message, port of socket.removeChatMessage.
+func (s *DefaultSocket) RemoveChatMessage(d RemoveMessageData) (*rtapi.ChannelMessageAck, error) {
+	env := &rtapi.Envelope{ChannelMessageRemove: &rtapi.ChannelMessageRemove{
+		ClanId:    atoiID(d.ClanID),
+		ChannelId: atoiID(d.ChannelID),
+		Mode:      int32(d.Mode),
+		IsPublic:  d.IsPublic,
+		MessageId: atoiID(d.MessageID),
+		TopicId:   atoiID(d.TopicID),
+	}}
+	resp, err := s.send(env, 0)
+	if err != nil {
+		return nil, err
+	}
+	return resp.ChannelMessageAck, nil
+}
+
+// JoinClanChat joins a clan's realtime chat, port of socket.joinClanChat.
+// isLastField sets ClanJoin.is_last_field; socket_manager passes true for the
+// pseudo-clan "0", whose ClanJoin would otherwise encode as an empty
+// submessage and end the abridged frame on a 0x00 byte.
+func (s *DefaultSocket) JoinClanChat(clanID string, isLastField bool) (*rtapi.ClanJoin, error) {
+	resp, err := s.send(&rtapi.Envelope{ClanJoin: &rtapi.ClanJoin{ClanId: atoiID(clanID), IsLastField: isLastField}}, 0)
+	if err != nil {
+		return nil, err
+	}
+	return resp.ClanJoin, nil
+}
+
+// JoinChat joins a channel's realtime chat, port of socket.joinChat.
+func (s *DefaultSocket) JoinChat(clanID, channelID string, channelType int, isPublic bool) (*rtapi.Channel, error) {
+	resp, err := s.send(&rtapi.Envelope{ChannelJoin: &rtapi.ChannelJoin{
+		ClanId:      atoiID(clanID),
+		ChannelId:   atoiID(channelID),
+		ChannelType: int32(channelType),
+		IsPublic:    isPublic,
+	}}, 0)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Channel, nil
+}
+
+// LeaveChat leaves a channel's realtime chat, port of socket.leaveChat.
+func (s *DefaultSocket) LeaveChat(clanID, channelID string, channelType int, isPublic bool) error {
+	_, err := s.send(&rtapi.Envelope{ChannelLeave: &rtapi.ChannelLeave{
+		ClanId:      atoiID(clanID),
+		ChannelId:   atoiID(channelID),
+		ChannelType: int32(channelType),
+		IsPublic:    isPublic,
+	}}, 0)
+	return err
+}

@@ -1,0 +1,541 @@
+package mezon
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+
+	"github.com/quangledang23/mezon-sdk-go/api"
+)
+
+// Default connection settings, port of the constants in MezonClientCore.ts.
+const (
+	DefaultHost      = "gw.mezon.ai"
+	DefaultPort      = "443"
+	DefaultUseSSL    = true
+	DefaultTimeoutMs = 7000
+)
+
+// ClientConfig configures a MezonClient. BotID and Token are required.
+type ClientConfig struct {
+	BotID   string
+	Token   string
+	Host    string
+	Port    string
+	UseSSL  *bool // nil => default (true)
+	Timeout time.Duration
+
+	// Transport selects the realtime wire transport: TransportTCP (abridged
+	// TLS/TCP, the default when empty) or TransportWebSocket.
+	Transport TransportKind
+	// TLSInsecureSkipVerify disables certificate verification for the TCP
+	// transport; dev gateways use self-signed certificates.
+	TLSInsecureSkipVerify bool
+
+	// Store, when non-nil, is an L2 cache shared across bot instances (e.g.
+	// Redis). Channel and user lookups consult it before hitting the REST API
+	// and populate it on a miss, so replicas avoid redundant REST calls. The
+	// in-memory caches remain the L1 (live objects); Store only holds the
+	// serializable data needed to rebuild them. nil => in-memory only.
+	Store SharedStore
+	// CacheTTL bounds how long entries live in Store (<= 0 => 5 minutes).
+	CacheTTL time.Duration
+	// MaxUsersCache / MaxChannelsCache bound the in-memory L1 caches so a
+	// long-running bot does not grow unboundedly (<= 0 => 5000 each).
+	MaxUsersCache    int
+	MaxChannelsCache int
+
+	// MessageStore, when non-nil, persists every inbound message and backs the
+	// per-channel Messages cache on a miss (port of the SQLite MessageDatabase).
+	// A SQLite implementation is available in the messagedb submodule. nil =>
+	// messages are cached in memory only.
+	MessageStore MessageStore
+}
+
+// MezonClient is the high-level Mezon bot client, port of MezonClient +
+// MezonClientCore. Construct with NewMezonClient, register event handlers with
+// On*/On, then call Login.
+type MezonClient struct {
+	Token    string
+	ClientID string
+	Host     string
+	Port     string
+	UseSSL   bool
+	Timeout  time.Duration
+
+	Transport             TransportKind
+	TLSInsecureSkipVerify bool
+
+	Clans    *CacheManager[string, *Clan]
+	Channels *CacheManager[string, *TextChannel]
+	Users    *CacheManager[string, *User]
+
+	loginBasePath  string
+	apiClient      *MezonApi
+	socket         *DefaultSocket
+	channelManager *ChannelManager
+	session        *Session
+	queue          *AsyncThrottleQueue
+	events         *emitter
+	store          SharedStore
+	messageDB      MessageStore
+	cacheTTL       time.Duration
+
+	mu             sync.Mutex
+	internalsBound bool
+	hardDisconnect bool
+	reconnecting   bool
+	refreshStop    chan struct{}
+}
+
+// NewMezonClient creates a client from config, applying defaults.
+func NewMezonClient(cfg ClientConfig) (*MezonClient, error) {
+	if cfg.BotID == "" {
+		return nil, errors.New("botId is required")
+	}
+	if cfg.Token == "" {
+		return nil, errors.New("token is required")
+	}
+	host := cfg.Host
+	if host == "" {
+		host = DefaultHost
+	}
+	port := cfg.Port
+	if port == "" {
+		port = DefaultPort
+	}
+	useSSL := DefaultUseSSL
+	if cfg.UseSSL != nil {
+		useSSL = *cfg.UseSSL
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeoutMs * time.Millisecond
+	}
+	scheme := "http://"
+	if useSSL {
+		scheme = "https://"
+	}
+	cacheTTL := cfg.CacheTTL
+	if cacheTTL <= 0 {
+		cacheTTL = defaultCacheTTL
+	}
+	maxUsers := cfg.MaxUsersCache
+	if maxUsers <= 0 {
+		maxUsers = defaultMaxCache
+	}
+	maxChannels := cfg.MaxChannelsCache
+	if maxChannels <= 0 {
+		maxChannels = defaultMaxCache
+	}
+	c := &MezonClient{
+		Token:                 cfg.Token,
+		ClientID:              cfg.BotID,
+		Host:                  host,
+		Port:                  port,
+		UseSSL:                useSSL,
+		Timeout:               timeout,
+		Transport:             cfg.Transport,
+		TLSInsecureSkipVerify: cfg.TLSInsecureSkipVerify,
+		loginBasePath:         scheme + host + ":" + port,
+		queue:                 NewAsyncThrottleQueue(0),
+		events:                newEmitter(),
+		store:                 cfg.Store,
+		messageDB:             cfg.MessageStore,
+		cacheTTL:              cacheTTL,
+		refreshStop:           make(chan struct{}),
+	}
+	c.Clans = NewCacheManager[string, *Clan](func(string) (*Clan, error) { return nil, ErrNotFound }, 0)
+	c.Channels = NewCacheManager[string, *TextChannel](c.fetchChannel, maxChannels)
+	c.Users = NewCacheManager[string, *User](c.fetchUser, maxUsers)
+	return c, nil
+}
+
+// On registers a handler for an event (see the Event* constants). The payload
+// type depends on the event; for EventChannelMessage it is *ChannelMessage,
+// for other events it is the decoded protobuf message pointer.
+func (c *MezonClient) On(event string, h Handler) { c.events.on(event, h) }
+
+// OnChannelMessage registers a handler for inbound chat messages.
+func (c *MezonClient) OnChannelMessage(h func(*ChannelMessage)) {
+	c.events.on(EventChannelMessage, func(p any) {
+		if m, ok := p.(*ChannelMessage); ok {
+			h(m)
+		}
+	})
+}
+
+// OnReady registers a handler invoked once the client has logged in and joined.
+func (c *MezonClient) OnReady(h func()) {
+	c.events.on(EventReady, func(any) { h() })
+}
+
+func (c *MezonClient) initManagers(basePath string, session *Session) {
+	c.apiClient = NewMezonApi(c.Token, basePath, c.Timeout)
+	wsURL := ""
+	if session != nil {
+		wsURL = session.WsURL
+	}
+	c.socket = NewDefaultSocket(wsURL, c.Host, c.Port, c.UseSSL, c.events.emit)
+	c.socket.Transport = c.Transport
+	c.socket.TLSInsecureSkipVerify = c.TLSInsecureSkipVerify
+	if session != nil {
+		c.socket.TcpURL = session.TcpURL
+	}
+	// REST API calls prefer the realtime socket once it is open (see
+	// MezonApi.doRawSocket); until then they go over HTTP.
+	c.apiClient.socket = c.socket
+	c.socket.OnDisconnect = func(reason string) {
+		if c.hardDisconnect {
+			return
+		}
+		go c.retryConnect()
+	}
+	c.channelManager = newChannelManager(c.apiClient, c.socket, c)
+	c.bindInternalListeners()
+}
+
+// Login authenticates the bot, connects the socket and joins all clans, port of
+// MezonClientCore.login/handleClientLogin. It returns once the client is ready.
+func (c *MezonClient) Login() error {
+	c.hardDisconnect = false
+	tempApi := NewMezonApi(c.Token, c.loginBasePath, c.Timeout)
+	sessApi, err := tempApi.MezonAuthenticate(c.ClientID, c.Token)
+	if err != nil {
+		return err
+	}
+	if sessApi == nil || sessApi.Token == "" {
+		return errors.New("authenticate returned empty session")
+	}
+	session, err := NewSession(sessApi.Token, sessApi.RefreshToken, itoaID(sessApi.UserId), sessApi.ApiUrl, sessApi.IdToken, sessApi.WsUrl)
+	if err != nil {
+		return err
+	}
+	session.TcpURL = sessApi.TcpUrl
+	c.session = session
+
+	basePath := c.loginBasePath
+	if sessApi.ApiUrl != "" {
+		host, port, useSSL, perr := ParseURLToHostAndSSL(sessApi.ApiUrl)
+		if perr == nil {
+			c.Host, c.Port, c.UseSSL = host, port, useSSL
+			scheme := "http://"
+			if useSSL {
+				scheme = "https://"
+			}
+			basePath = scheme + host + ":" + port
+		}
+	}
+	c.initManagers(basePath, session)
+
+	if err := c.socket.Connect(session, true); err != nil {
+		return err
+	}
+	if err := c.postConnectInit(session.Token); err != nil {
+		return err
+	}
+	c.events.emit(EventReady, nil)
+	go c.tokenRefreshLoop()
+	return nil
+}
+
+// postConnectInit rebuilds clan/channel state after the socket (re)connects:
+// join clans and load their channels, then discover DM channels and pre-cache
+// them as live TextChannels. Shared by Login and retryConnect, port of the
+// common tail of MezonClientCore.handleClientLogin/handleReconnectSocket.
+// A DM-channel init failure is non-fatal, mirroring the TS which logs and
+// continues.
+func (c *MezonClient) postConnectInit(sessionToken string) error {
+	if err := c.connectSocket(sessionToken); err != nil {
+		return err
+	}
+	if err := c.channelManager.InitAllDMChannels(sessionToken); err != nil {
+		log.Printf("mezon: InitAllDMChannels failed: %v", err)
+	}
+	c.initDmChannelCache()
+	return nil
+}
+
+// connectSocket joins clan chats and builds Clan objects, port of
+// socket_manager.connectSocket / runClanInitPipeline: channels are pre-loaded
+// per clan before joining its chat, and failed clans are retried.
+func (c *MezonClient) connectSocket(sessionToken string) error {
+	clans, err := c.apiClient.ListClanDescs(sessionToken, 0, 0, "")
+	if err != nil {
+		return fmt.Errorf("listClanDescs failed: %w", err)
+	}
+	type clanInfo struct {
+		id, name, welcome string
+	}
+	// The global / DM pseudo-clan "0" goes first, port of fetchClanList.
+	list := []clanInfo{{"0", "", ""}}
+	for _, cl := range clans.GetClandesc() {
+		list = append(list, clanInfo{itoaID(cl.ClanId), cl.ClanName, itoaID(cl.WelcomeChannelId)})
+	}
+	// Give the server a beat after connect before joining clan chats.
+	time.Sleep(time.Second)
+	// Build every Clan object up front, port of ensureClanObjects. A clan that
+	// already exists (reconnect) is refreshed in place instead of recreated so
+	// its channel/message caches survive, port of the socket_manager reconnect
+	// fix in mezon-js PR #1129.
+	for _, cl := range list {
+		if existing, ok := c.Clans.Get(cl.id); ok {
+			existing.updateFromDesc(cl.name, cl.welcome, sessionToken)
+			continue
+		}
+		clanObj := newClan(cl.id, orString(cl.name, "unknown"), cl.welcome, cl.name, c, sessionToken)
+		c.Clans.Set(cl.id, clanObj)
+	}
+	// Load each clan's channels, then join its chat, port of
+	// initClanChannelsAndJoin. The pseudo-clan "0" has no channels to load.
+	// ReloadChannels (not LoadChannels) so a reconnect re-fetches the list.
+	initClan := func(cl clanInfo) bool {
+		if cl.id != "0" {
+			clanObj, ok := c.Clans.Get(cl.id)
+			if !ok {
+				return false
+			}
+			if err := clanObj.ReloadChannels(); err != nil {
+				return false
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		// The pseudo-clan "0" is sent with is_last_field so its otherwise empty
+		// ClanJoin never ends the abridged frame on a 0x00 byte (mezon-sdk v2.16).
+		_, err := c.socket.JoinClanChat(cl.id, cl.id == "0")
+		return err == nil
+	}
+	var failed []clanInfo
+	for _, cl := range list {
+		if !initClan(cl) {
+			failed = append(failed, cl)
+		}
+	}
+	// Up to 5 retry rounds, pacing harder each attempt. The TS widens its
+	// global API rate-limiter delay by 500ms per attempt; without a limiter we
+	// sleep the same amount before each retried clan.
+	for attempt := 1; attempt <= 5 && len(failed) > 0; attempt++ {
+		var still []clanInfo
+		for _, cl := range failed {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			if !initClan(cl) {
+				still = append(still, cl)
+			}
+		}
+		failed = still
+	}
+	// TS leaves clans that never initialized silently uninitialized; log so a
+	// stuck clan is at least visible.
+	for _, cl := range failed {
+		log.Printf("mezon: init clan %s failed after retries", cl.id)
+	}
+	return nil
+}
+
+func (c *MezonClient) retryConnect() {
+	c.mu.Lock()
+	if c.reconnecting || c.hardDisconnect {
+		c.mu.Unlock()
+		return
+	}
+	c.reconnecting = true
+	c.mu.Unlock()
+
+	delay := 5 * time.Second
+	const maxDelay = 60 * time.Second
+	for !c.hardDisconnect {
+		time.Sleep(delay)
+		if c.session == nil {
+			break
+		}
+
+		// Re-authenticate with bot credentials to obtain fresh session token
+		if err := c.refreshSession(); err != nil {
+			log.Printf("mezon: reconnect authenticate failed, retrying in %s: %v", delay*2, err)
+			if delay = delay * 2; delay > maxDelay {
+				delay = maxDelay
+			}
+			continue
+		}
+
+		if err := c.socket.Connect(c.session, true); err == nil {
+			if err := c.postConnectInit(c.session.Token); err == nil {
+				log.Printf("mezon: reconnected and reinitialized successfully")
+				break
+			} else {
+				log.Printf("mezon: reconnect init failed: %v", err)
+			}
+		} else {
+			log.Printf("mezon: reconnect dial failed, retrying in %s: %v", delay*2, err)
+		}
+		if delay = delay * 2; delay > maxDelay {
+			delay = maxDelay
+		}
+	}
+	c.mu.Lock()
+	c.reconnecting = false
+	c.mu.Unlock()
+}
+
+// refreshSession re-authenticates the bot with Mezon using ClientID and Token,
+// obtaining a fresh session token and updating the client and clans.
+func (c *MezonClient) refreshSession() error {
+	c.mu.Lock()
+	clientID := c.ClientID
+	token := c.Token
+	loginBasePath := c.loginBasePath
+	timeout := c.Timeout
+	c.mu.Unlock()
+
+	tempApi := NewMezonApi(token, loginBasePath, timeout)
+	sessApi, err := tempApi.MezonAuthenticate(clientID, token)
+	if err != nil {
+		return fmt.Errorf("mezon authenticate: %w", err)
+	}
+	if sessApi == nil || sessApi.Token == "" {
+		return errors.New("authenticate returned empty session")
+	}
+
+	session, err := NewSession(sessApi.Token, sessApi.RefreshToken, itoaID(sessApi.UserId), sessApi.ApiUrl, sessApi.IdToken, sessApi.WsUrl)
+	if err != nil {
+		return fmt.Errorf("new session: %w", err)
+	}
+	session.TcpURL = sessApi.TcpUrl
+
+	c.mu.Lock()
+	c.session = session
+	c.mu.Unlock()
+
+	// Update cached clans with the fresh session token
+	if c.Clans != nil {
+		for _, clanObj := range c.Clans.Values() {
+			if clanObj != nil {
+				clanObj.SessionToken = session.Token
+			}
+		}
+	}
+
+	return nil
+}
+
+// tokenRefreshLoop proactively refreshes the session token before it expires (tokens typically expire after 1 hour).
+func (c *MezonClient) tokenRefreshLoop() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.refreshStop:
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			hardDisc := c.hardDisconnect
+			sess := c.session
+			c.mu.Unlock()
+
+			if hardDisc {
+				return
+			}
+
+			// Proactively refresh when less than 10 minutes remain before expiry
+			if sess != nil && sess.ExpiresAt > 0 {
+				now := time.Now().Unix()
+				timeRemaining := time.Duration(sess.ExpiresAt-now) * time.Second
+				if timeRemaining < 10*time.Minute {
+					log.Printf("mezon: session token expires in %s, proactively refreshing...", timeRemaining.Round(time.Second))
+					if err := c.refreshSession(); err != nil {
+						log.Printf("mezon: proactive token refresh failed: %v", err)
+					} else {
+						log.Printf("mezon: proactive session token refresh succeeded")
+					}
+				}
+			}
+		}
+	}
+}
+
+// Close shuts down the socket and prevents reconnection.
+func (c *MezonClient) Close() {
+	c.mu.Lock()
+	if c.hardDisconnect {
+		c.mu.Unlock()
+		return
+	}
+	c.hardDisconnect = true
+	if c.refreshStop != nil {
+		select {
+		case <-c.refreshStop:
+		default:
+			close(c.refreshStop)
+		}
+	}
+	c.mu.Unlock()
+
+	if c.socket != nil {
+		c.socket.Close()
+	}
+}
+
+// Socket returns the underlying socket for advanced/raw realtime calls.
+func (c *MezonClient) Socket() *DefaultSocket { return c.socket }
+
+// Api returns the REST client bound to this MezonClient (nil before Login).
+// Calls need the session token; see SessionToken.
+func (c *MezonClient) Api() *MezonApi { return c.apiClient }
+
+// SessionToken returns the current session's bearer token, or "" before Login.
+func (c *MezonClient) SessionToken() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session == nil {
+		return ""
+	}
+	return c.session.Token
+}
+
+// CreatePoll creates a poll in a channel, port of MezonClientCore.createPoll.
+func (c *MezonClient) CreatePoll(req *api.CreatePollRequest) (*api.CreatePollResponse, error) {
+	if c.apiClient == nil || c.session == nil {
+		return nil, ErrNotLoggedIn
+	}
+	return c.apiClient.CreatePoll(c.session.Token, req)
+}
+
+// ClosePoll closes a poll, port of MezonClientCore.closePoll. Pass pollID, or
+// messageID + channelID with an empty pollID.
+func (c *MezonClient) ClosePoll(pollID, messageID, channelID string) error {
+	if c.apiClient == nil || c.session == nil {
+		return ErrNotLoggedIn
+	}
+	return c.apiClient.ClosePoll(c.session.Token, pollID, messageID, channelID)
+}
+
+// GetPoll fetches a poll with results, port of MezonClientCore.getPoll. Pass
+// pollID, or messageID + channelID with an empty pollID.
+func (c *MezonClient) GetPoll(pollID, messageID, channelID string) (*api.GetPollResponse, error) {
+	if c.apiClient == nil || c.session == nil {
+		return nil, ErrNotLoggedIn
+	}
+	return c.apiClient.GetPoll(c.session.Token, pollID, messageID, channelID)
+}
+
+// GenerateMeetToken issues an SFU access token for a voice channel, port of
+// MezonClientCore.generateMeetToken.
+func (c *MezonClient) GenerateMeetToken(req *api.GenerateMeetTokenRequest) (*api.GenerateMeetTokenResponse, error) {
+	if c.apiClient == nil || c.session == nil {
+		return nil, ErrNotLoggedIn
+	}
+	return c.apiClient.GenerateMeetToken(c.session.Token, req)
+}
+
+// ChannelManager returns the DM channel manager.
+func (c *MezonClient) ChannelManager() *ChannelManager { return c.channelManager }
+
+func orString(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
