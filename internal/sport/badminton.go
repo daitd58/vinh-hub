@@ -124,11 +124,12 @@ type AttendanceState struct {
 
 // SummaryResult contains the parsed attendance details.
 type SummaryResult struct {
-	Going     []string
-	NotGoing  []string
-	CourtInfo string
-	Notes     []string
-	RawAI     string
+	Going      []string
+	TotalSlots int
+	NotGoing   []string
+	CourtInfo  string
+	Notes      []string
+	RawAI      string
 }
 
 // Config configures the badminton manager.
@@ -782,35 +783,36 @@ func (m *Manager) TriggerReminderWithTime(ctx context.Context, now time.Time, ma
 
 	sb.WriteString("📋 **TỔNG KẾT TÌNH HÌNH ĐIỂM DANH & ĐẶT SÂN:**\n")
 
-	if summary.RawAI != "" {
-		sb.WriteString(summary.RawAI)
+	// Format attendance strictly from reactions
+	if len(summary.Going) > 0 {
+		slotText := fmt.Sprintf("%d người", len(summary.Going))
+		if summary.TotalSlots > len(summary.Going) {
+			slotText = fmt.Sprintf("%d người - %d slot", len(summary.Going), summary.TotalSlots)
+		}
+		sb.WriteString(fmt.Sprintf("• ✅ **Tham gia (%s):** %s\n", slotText, strings.Join(summary.Going, ", ")))
 	} else {
-		// Format from rule-based parser
-		if len(summary.Going) > 0 {
-			sb.WriteString(fmt.Sprintf("• ✅ **Tham gia (%d người):** %s\n", len(summary.Going), strings.Join(summary.Going, ", ")))
-		} else {
-			sb.WriteString("• ✅ **Tham gia:** Chưa có ai xác nhận trên nhóm\n")
-		}
+		sb.WriteString("• ✅ **Tham gia:** Chưa có ai điểm danh trên nhóm (react :cong1: để tham gia nhé!)\n")
+	}
 
-		if len(summary.NotGoing) > 0 {
-			sb.WriteString(fmt.Sprintf("• ❌ **Vắng mặt (%d người):** %s\n", len(summary.NotGoing), strings.Join(summary.NotGoing, ", ")))
-		}
+	if len(summary.NotGoing) > 0 {
+		sb.WriteString(fmt.Sprintf("• ❌ **Vắng mặt (%d người):** %s\n", len(summary.NotGoing), strings.Join(summary.NotGoing, ", ")))
+	}
 
-		if summary.CourtInfo != "" {
-			sb.WriteString(fmt.Sprintf("• 🏟️ **Sân bãi:** %s\n", summary.CourtInfo))
-		} else {
-			sb.WriteString("• 🏟️ **Sân bãi:** Chưa thấy thông tin chốt sân trên nhóm (anh em kiểm tra/đặt sân nhé!)\n")
-		}
+	court := strings.TrimSpace(summary.CourtInfo)
+	if court != "" && !strings.EqualFold(court, "Chưa có thông tin sân") {
+		sb.WriteString(fmt.Sprintf("• 🏟️ **Sân bãi:** %s\n", court))
+	} else {
+		sb.WriteString("• 🏟️ **Sân bãi:** Chưa thấy thông tin chốt sân trên nhóm (anh em kiểm tra/đặt sân nhé!)\n")
+	}
 
-		if isExplicitTime {
-			sb.WriteString(fmt.Sprintf("• ⏰ **Giờ đánh đã đặt:** %s (nhắc trước 1 tiếng)\n", matchTimeStr))
-		} else {
-			sb.WriteString(fmt.Sprintf("• ⏰ **Giờ đánh dự kiến:** %s (vui lòng kiểm tra lại giờ sân đã đặt)\n", matchTimeStr))
-		}
+	if isExplicitTime {
+		sb.WriteString(fmt.Sprintf("• ⏰ **Giờ đánh đã đặt:** %s (nhắc trước 1 tiếng)\n", matchTimeStr))
+	} else {
+		sb.WriteString(fmt.Sprintf("• ⏰ **Giờ đánh dự kiến:** %s (vui lòng kiểm tra lại giờ sân đã đặt)\n", matchTimeStr))
+	}
 
-		if len(summary.Notes) > 0 {
-			sb.WriteString(fmt.Sprintf("• 💬 **Ghi chú:** %s\n", strings.Join(summary.Notes, " | ")))
-		}
+	if len(summary.Notes) > 0 {
+		sb.WriteString(fmt.Sprintf("• 💬 **Ghi chú:** %s\n", strings.Join(summary.Notes, " | ")))
 	}
 
 	sb.WriteString("\nChúc anh em một buổi giao lưu quật cầu thật cháy và nhiều tiếng cười! 🔥💪")
@@ -819,94 +821,103 @@ func (m *Manager) TriggerReminderWithTime(ctx context.Context, now time.Time, ma
 	return err
 }
 
-// SummarizeMessages produces a summary using OpenAI if available, then Gemini, or the NLP rule-based parser merged with reactions.
+// SummarizeMessages gathers attendance strictly from reactions, and extracts court info from messages via AI or NLP.
 func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecord) SummaryResult {
 	m.mu.Lock()
-	var goingReactions, notGoingReactions []string
-	for _, uname := range m.state.ReactionsGoing {
-		goingReactions = append(goingReactions, uname)
+	var going []string
+	totalSlots := 0
+
+	// 1. Attendance strictly from reactions
+	if len(m.state.GoingParticipants) > 0 {
+		for _, p := range m.state.GoingParticipants {
+			disp := p.DisplayName
+			if disp == "" {
+				disp = m.ResolveDisplayName(p.UserID, p.Username)
+			}
+			if disp == "" {
+				disp = p.Username
+			}
+			if disp == "" {
+				disp = p.UserID
+			}
+			if p.Slots > 1 {
+				going = append(going, fmt.Sprintf("%s (%d slot)", disp, p.Slots))
+			} else {
+				going = append(going, disp)
+			}
+			totalSlots += p.Slots
+		}
+	} else if len(m.state.ReactionsGoing) > 0 {
+		for uid, uname := range m.state.ReactionsGoing {
+			disp := m.ResolveDisplayName(uid, uname)
+			if disp == "" {
+				disp = uname
+			}
+			if disp == "" {
+				disp = uid
+			}
+			going = append(going, disp)
+			totalSlots++
+		}
 	}
-	for _, uname := range m.state.ReactionsNotGoing {
-		notGoingReactions = append(notGoingReactions, uname)
+
+	var notGoing []string
+	for uid, uname := range m.state.ReactionsNotGoing {
+		disp := m.ResolveDisplayName(uid, uname)
+		if disp == "" {
+			disp = uname
+		}
+		if disp == "" {
+			disp = uid
+		}
+		notGoing = append(notGoing, disp)
 	}
 	m.mu.Unlock()
 
-	sort.Strings(goingReactions)
-	sort.Strings(notGoingReactions)
-
-	if len(messages) == 0 && len(goingReactions) == 0 && len(notGoingReactions) == 0 {
-		return SummaryResult{
-			CourtInfo: "Chưa có thông tin sân",
-		}
-	}
-
-	if m.cfg.OpenAIKey != "" {
-		aiText, err := m.callOpenAISummary(ctx, messages, goingReactions, notGoingReactions)
-		if err == nil && strings.TrimSpace(aiText) != "" {
-			return SummaryResult{
-				RawAI: aiText,
-			}
-		}
-		if err != nil {
-			m.log.Warn("failed to call openai summary, falling back", "err", err)
-		}
-	}
-
-	if m.cfg.GeminiKey != "" {
-		aiText, err := m.callGeminiSummary(ctx, messages, goingReactions, notGoingReactions)
-		if err == nil && strings.TrimSpace(aiText) != "" {
-			return SummaryResult{
-				RawAI: aiText,
-			}
-		}
-		if err != nil {
-			m.log.Warn("failed to call gemini summary, falling back", "err", err)
-		}
-	}
-
-	// Fallback to Rule-based NLP Parser merged with reactions
-	nlpRes := m.ParseMessagesNLP(messages)
-
-	goingMap := make(map[string]bool)
-	notGoingMap := make(map[string]bool)
-
-	for _, u := range goingReactions {
-		disp := m.ResolveDisplayName("", u)
-		goingMap[disp] = true
-	}
-	for _, u := range notGoingReactions {
-		disp := m.ResolveDisplayName("", u)
-		notGoingMap[disp] = true
-	}
-
-	for _, u := range nlpRes.Going {
-		disp := m.ResolveDisplayName("", u)
-		delete(notGoingMap, disp)
-		goingMap[disp] = true
-	}
-	for _, u := range nlpRes.NotGoing {
-		disp := m.ResolveDisplayName("", u)
-		delete(goingMap, disp)
-		notGoingMap[disp] = true
-	}
-
-	var going []string
-	for u := range goingMap {
-		going = append(going, u)
-	}
 	sort.Strings(going)
-
-	var notGoing []string
-	for u := range notGoingMap {
-		notGoing = append(notGoing, u)
-	}
 	sort.Strings(notGoing)
 
+	// 2. Court info extracted from messages (AI preferred, fallback to NLP)
+	courtInfo := ""
+	var notes []string
+
+	if len(messages) > 0 {
+		if m.cfg.OpenAIKey != "" {
+			aiCourt, err := m.callOpenAICourtInfo(ctx, messages)
+			if err == nil && strings.TrimSpace(aiCourt) != "" {
+				courtInfo = cleanCourtOutput(aiCourt)
+			} else if err != nil {
+				m.log.Warn("failed to call openai court extraction, falling back", "err", err)
+			}
+		}
+
+		if courtInfo == "" && m.cfg.GeminiKey != "" {
+			aiCourt, err := m.callGeminiCourtInfo(ctx, messages)
+			if err == nil && strings.TrimSpace(aiCourt) != "" {
+				courtInfo = cleanCourtOutput(aiCourt)
+			} else if err != nil {
+				m.log.Warn("failed to call gemini court extraction, falling back", "err", err)
+			}
+		}
+
+		if courtInfo == "" {
+			nlpRes := m.ParseMessagesNLP(messages)
+			courtInfo = nlpRes.CourtInfo
+			notes = nlpRes.Notes
+		}
+	}
+
+	if courtInfo == "" {
+		courtInfo = "Chưa có thông tin sân"
+	}
+
 	return SummaryResult{
-		Going:     going,
-		NotGoing:  notGoing,
-		CourtInfo: nlpRes.CourtInfo,
-		Notes:     nlpRes.Notes,
+		Going:      going,
+		TotalSlots: totalSlots,
+		NotGoing:   notGoing,
+		CourtInfo:  courtInfo,
+		Notes:      notes,
+		RawAI:      courtInfo,
 	}
 }
 
@@ -988,44 +999,91 @@ func parseMessagesNLPInternal(messages []MessageRecord, resolver func(userID, us
 	}
 }
 
+func cleanCourtOutput(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "Chưa có thông tin sân"
+	}
+	lines := strings.Split(s, "\n")
+	courtLine := ""
+	for _, line := range lines {
+		l := strings.TrimSpace(line)
+		if l == "" {
+			continue
+		}
+		lower := strings.ToLower(l)
+		if strings.Contains(l, "🏟️") || strings.Contains(lower, "sân") || strings.Contains(lower, "minh hải") {
+			courtLine = l
+			break
+		}
+	}
+	if courtLine != "" {
+		s = courtLine
+	}
+
+	for {
+		trimmed := false
+		s = strings.TrimSpace(s)
+		if strings.HasPrefix(s, "•") {
+			s = strings.TrimPrefix(s, "•")
+			trimmed = true
+		}
+		if strings.HasPrefix(s, "-") {
+			s = strings.TrimPrefix(s, "-")
+			trimmed = true
+		}
+		if strings.HasPrefix(s, "🏟️") {
+			s = strings.TrimPrefix(s, "🏟️")
+			trimmed = true
+		}
+		if strings.HasPrefix(s, "**Sân bãi:**") {
+			s = strings.TrimPrefix(s, "**Sân bãi:**")
+			trimmed = true
+		}
+		if strings.HasPrefix(s, "**Sân:**") {
+			s = strings.TrimPrefix(s, "**Sân:**")
+			trimmed = true
+		}
+		if strings.HasPrefix(s, "Sân bãi:") {
+			s = strings.TrimPrefix(s, "Sân bãi:")
+			trimmed = true
+		}
+		if strings.HasPrefix(s, "Sân:") {
+			s = strings.TrimPrefix(s, "Sân:")
+			trimmed = true
+		}
+		if !trimmed {
+			break
+		}
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "Chưa có thông tin sân"
+	}
+	return s
+}
+
 func (m *Manager) buildTranscript(messages []MessageRecord, goingReactions, notGoingReactions []string) string {
+	return m.buildMessagesTranscript(messages)
+}
+
+func (m *Manager) buildMessagesTranscript(messages []MessageRecord) string {
 	var sb strings.Builder
-
-	if len(goingReactions) > 0 || len(notGoingReactions) > 0 {
-		sb.WriteString("Danh sách điểm danh qua reaction tin nhắn:\n")
-		if len(goingReactions) > 0 {
-			var resolvedGoing []string
-			for _, u := range goingReactions {
-				resolvedGoing = append(resolvedGoing, m.ResolveDisplayName("", u))
-			}
-			sb.WriteString(fmt.Sprintf("- Đã react :cong1: (tham gia - %d người): %s\n", len(resolvedGoing), strings.Join(resolvedGoing, ", ")))
+	for _, msg := range messages {
+		name := msg.DisplayName
+		if name == "" {
+			name = m.ResolveDisplayName(msg.UserID, msg.Username)
 		}
-		if len(notGoingReactions) > 0 {
-			var resolvedNotGoing []string
-			for _, u := range notGoingReactions {
-				resolvedNotGoing = append(resolvedNotGoing, m.ResolveDisplayName("", u))
-			}
-			sb.WriteString(fmt.Sprintf("- Đã react :tru1: (vắng mặt/bận - %d người): %s\n", len(resolvedNotGoing), strings.Join(resolvedNotGoing, ", ")))
-		}
-		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", name, msg.Content))
 	}
-
-	if len(messages) > 0 {
-		sb.WriteString("Tin nhắn trò chuyện trong nhóm chat:\n")
-		for _, msg := range messages {
-			name := msg.DisplayName
-			if name == "" {
-				name = m.ResolveDisplayName(msg.UserID, msg.Username)
-			}
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", name, msg.Content))
-		}
-	}
-
 	return sb.String()
 }
 
-func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecord, goingReactions, notGoingReactions []string) (string, error) {
-	transcript := m.buildTranscript(messages, goingReactions, notGoingReactions)
+func (m *Manager) callOpenAICourtInfo(ctx context.Context, messages []MessageRecord) (string, error) {
+	transcript := m.buildMessagesTranscript(messages)
+	if strings.TrimSpace(transcript) == "" {
+		return "Chưa có thông tin sân", nil
+	}
 
 	baseURL := m.cfg.OpenAIBaseURL
 	if baseURL == "" {
@@ -1043,20 +1101,15 @@ func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecor
 		"messages": []map[string]string{
 			{
 				"role": "system",
-				"content": "Bạn là trợ lý cho câu lạc bộ cầu lông Vinh-CL. Dựa vào danh sách reaction và tin nhắn trong nhóm chat, hãy tóm tắt ngắn gọn và rõ ràng tình hình đánh cầu bằng tiếng Việt theo các gạch đầu dòng sau:\n" +
-					"• ✅ **Tham gia (số lượng):** [Liệt kê Clan Nickname / Họ tên hiển thị những người xác nhận tham gia qua reaction :cong1: hoặc chat]\n" +
-					"• ❌ **Vắng mặt:** [Liệt kê Clan Nickname / Họ tên hiển thị những người xin nghỉ/bận qua reaction :tru1: hoặc chat, nếu có]\n" +
-					"• 🏟️ **Sân bãi:** [Thông tin sân đã đặt nào hoặc chưa/k có sân, giờ chơi nếu có]\n\n" +
-					"QUY TẮC BẮT BUỘC VỀ TÊN VÀ XỬ LÝ TRÙNG LẶP:\n" +
-					"1. BẮT BUỘC DÙNG CLAN NICKNAME / TÊN HIỂN THỊ CỦA THÀNH VIÊN (ví dụ: Sơn Nguyễn Trường, Trịnh Đức Đại, Lê Đức Anh, v.v.). TUYỆT ĐỐI KHÔNG dùng username kỹ thuật (như son.nguyentruong1, dai.trinhduc, ntdon1502).\n" +
-					"2. XỬ LÝ GỘP (DEDUPLICATE) CÁC TÊN GỌI TẮT VÀ ALIAS: Các tên gọi tắt hoặc username như 'son.nt', 'son.nguyentruong1', 'Sơn NT', 'Sơn Nguyễn Trường' đều là CÙNG MỘT NGƯỜI (Sơn Nguyễn Trường). Tuyệt đối KHÔNG ĐƯỢC tính thành 2 người riêng biệt!\n" +
-					"3. Nếu một người vừa react tin nhắn vừa chat trong nhóm, chỉ tính là 1 người duy nhất.\n" +
-					"4. Đếm chính xác số người thực tế trong ngoặc đơn, không bao giờ được đếm trùng lặp.\n" +
-					"Chỉ trả về nội dung gạch đầu dòng ngắn gọn, súc tích, không thêm lời chào hay giải thích rườm rà.",
+				"content": "Bạn là trợ lý cho câu lạc bộ cầu lông Vinh-CL. Nhiệm vụ của bạn là đọc các tin nhắn thảo luận trong nhóm và trích xuất thông tin về SÂN BÃI ĐÃ ĐẶT (tên sân, số sân, khung giờ đánh nếu có).\n" +
+					"QUY TẮC:\n" +
+					"1. Chỉ trích xuất thông tin sân bãi, số sân và khung giờ chơi (ví dụ: 'Sân Minh Hải, Sân 6, khung giờ 19:30 - 21:30 (tối nay)').\n" +
+					"2. TUYỆT ĐỐI KHÔNG liệt kê danh sách người tham gia hay người vắng mặt.\n" +
+					"3. Nếu trong tin nhắn chưa có ai chốt sân hoặc chưa có thông tin đặt sân, hãy trả lời ngắn gọn: 'Chưa có thông tin sân'.",
 			},
 			{
 				"role":    "user",
-				"content": fmt.Sprintf("Dưới đây là thông tin điểm danh và tin nhắn nhóm:\n\n%s", transcript),
+				"content": fmt.Sprintf("Dưới đây là các tin nhắn trao đổi trong nhóm:\n\n%s\n\nHãy trích xuất thông tin sân bãi đã đặt:", transcript),
 			},
 		},
 		"temperature": 0.2,
@@ -1108,21 +1161,23 @@ func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecor
 	return "", fmt.Errorf("empty openai choices response")
 }
 
-func (m *Manager) callGeminiSummary(ctx context.Context, messages []MessageRecord, goingReactions, notGoingReactions []string) (string, error) {
-	transcript := m.buildTranscript(messages, goingReactions, notGoingReactions)
+func (m *Manager) callOpenAISummary(ctx context.Context, messages []MessageRecord, goingReactions, notGoingReactions []string) (string, error) {
+	return m.callOpenAICourtInfo(ctx, messages)
+}
+
+func (m *Manager) callGeminiCourtInfo(ctx context.Context, messages []MessageRecord) (string, error) {
+	transcript := m.buildMessagesTranscript(messages)
+	if strings.TrimSpace(transcript) == "" {
+		return "Chưa có thông tin sân", nil
+	}
 
 	prompt := fmt.Sprintf(
-		"Dưới đây là thông tin điểm danh và tin nhắn trong nhóm chat câu lạc bộ cầu lông Vinh-CL:\n\n%s\n\n"+
-			"Hãy tóm tắt ngắn gọn và rõ ràng tình hình đánh cầu bằng tiếng Việt theo các gạch đầu dòng sau:\n"+
-			"• ✅ **Tham gia (số lượng):** [Liệt kê Clan Nickname / Họ tên hiển thị những người xác nhận tham gia qua reaction :cong1: hoặc chat]\n"+
-			"• ❌ **Vắng mặt:** [Liệt kê Clan Nickname / Họ tên hiển thị những người xin nghỉ/bận qua reaction :tru1: hoặc chat, nếu có]\n"+
-			"• 🏟️ **Sân bãi:** [Thông tin sân đã đặt nào hoặc chưa/k có sân, khung giờ chơi nếu có]\n\n"+
-			"QUY TẮC BẮT BUỘC VỀ TÊN VÀ XỬ LÝ TRÙNG LẶP:\n"+
-			"1. BẮT BUỘC DÙNG CLAN NICKNAME / TÊN HIỂN THỊ CỦA THÀNH VIÊN (ví dụ: Sơn Nguyễn Trường, Trịnh Đức Đại, Lê Đức Anh, v.v.). TUYỆT ĐỐI KHÔNG dùng username kỹ thuật (như son.nguyentruong1, dai.trinhduc, ntdon1502).\n"+
-			"2. XỬ LÝ GỘP (DEDUPLICATE) CÁC TÊN GỌI TẮT VÀ ALIAS: Các tên gọi tắt như 'son.nt', 'son.nguyentruong1', 'Sơn NT', 'Sơn Nguyễn Trường' đều là CÙNG MỘT NGƯỜI (Sơn Nguyễn Trường). Tuyệt đối KHÔNG ĐƯỢC tính thành 2 người riêng biệt!\n"+
-			"3. Nếu một người vừa react tin nhắn vừa chat trong nhóm, chỉ tính là 1 người duy nhất.\n"+
-			"4. Đếm chính xác số người thực tế trong ngoặc đơn, không bao giờ được đếm trùng lặp.\n"+
-			"Chỉ trả về nội dung gạch đầu dòng ngắn gọn, không rườm rà.",
+		"Dưới đây là các tin nhắn thảo luận trong nhóm chat câu lạc bộ cầu lông Vinh-CL:\n\n%s\n\n"+
+			"Hãy trích xuất ngắn gọn thông tin về SÂN BÃI ĐÃ ĐẶT (tên sân, số sân, khung giờ chơi nếu có).\n"+
+			"QUY TẮC:\n"+
+			"1. Chỉ trích xuất thông tin sân bãi và giờ đánh. TUYỆT ĐỐI KHÔNG liệt kê danh sách người tham gia hoặc người vắng mặt.\n"+
+			"2. Nếu chưa có thông tin đặt sân nào trong các tin nhắn, hãy trả về chính xác: 'Chưa có thông tin sân'.\n"+
+			"Chỉ trả về nội dung ngắn gọn về sân bãi, không thêm lời chào hay giải thích rườm rà.",
 		transcript,
 	)
 
@@ -1181,6 +1236,10 @@ func (m *Manager) callGeminiSummary(ctx context.Context, messages []MessageRecor
 	return "", fmt.Errorf("empty gemini response")
 }
 
+func (m *Manager) callGeminiSummary(ctx context.Context, messages []MessageRecord, goingReactions, notGoingReactions []string) (string, error) {
+	return m.callGeminiCourtInfo(ctx, messages)
+}
+
 func (m *Manager) sendWithRoleMention(ctx context.Context, text string) (string, error) {
 	if m.sender == nil {
 		m.log.Warn("no message sender configured for sport manager")
@@ -1213,24 +1272,26 @@ func (m *Manager) GetSummary(ctx context.Context) string {
 	m.mu.Unlock()
 
 	summary := m.SummarizeMessages(ctx, messages)
-	if summary.RawAI != "" {
-		return summary.RawAI
-	}
 
 	var sb strings.Builder
 	sb.WriteString("📋 **TÌNH HÌNH ĐIỂM DANH HIỆN TẠI:**\n")
 	if len(summary.Going) > 0 {
-		sb.WriteString(fmt.Sprintf("• ✅ **Tham gia (%d người):** %s\n", len(summary.Going), strings.Join(summary.Going, ", ")))
+		slotText := fmt.Sprintf("%d người", len(summary.Going))
+		if summary.TotalSlots > len(summary.Going) {
+			slotText = fmt.Sprintf("%d người - %d slot", len(summary.Going), summary.TotalSlots)
+		}
+		sb.WriteString(fmt.Sprintf("• ✅ **Tham gia (%s):** %s\n", slotText, strings.Join(summary.Going, ", ")))
 	} else {
-		sb.WriteString("• ✅ **Tham gia:** Chưa có ai điểm danh\n")
+		sb.WriteString("• ✅ **Tham gia:** Chưa có ai điểm danh (react :cong1: để tham gia nhé!)\n")
 	}
 
 	if len(summary.NotGoing) > 0 {
 		sb.WriteString(fmt.Sprintf("• ❌ **Vắng mặt (%d người):** %s\n", len(summary.NotGoing), strings.Join(summary.NotGoing, ", ")))
 	}
 
-	if summary.CourtInfo != "" {
-		sb.WriteString(fmt.Sprintf("• 🏟️ **Sân:** %s\n", summary.CourtInfo))
+	court := strings.TrimSpace(summary.CourtInfo)
+	if court != "" && !strings.EqualFold(court, "Chưa có thông tin sân") {
+		sb.WriteString(fmt.Sprintf("• 🏟️ **Sân:** %s\n", court))
 	} else {
 		sb.WriteString("• 🏟️ **Sân:** Chưa có thông tin sân\n")
 	}

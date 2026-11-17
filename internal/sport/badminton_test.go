@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +216,10 @@ func TestManager_TriggerReminder(t *testing.T) {
 		RoleName:  "Vinh-CL",
 		StatePath: stateFile,
 	}, sender)
+
+	// Add reactions for attendance
+	mgr.RecordReaction("test-chan", "m0", "u1", "nam.nguyen", ":cong1:", false, 1)
+	mgr.RecordReaction("test-chan", "m0", "u2", "viet.le", ":tru1:", false, 1)
 
 	// Add messages
 	mgr.RecordMessage("test-chan", "m1", "u1", "nam.nguyen", "e đi nha")
@@ -906,3 +911,55 @@ func TestBillIDGenerationAndCustomTagSplit(t *testing.T) {
 		t.Errorf("expected bill 2 to remain completely unpaid, got paid=%d unpaid=%d", len(b2Paid), len(b2Unpaid))
 	}
 }
+
+func TestAttendanceStrictlyFromReactionsAndCourtFromChat(t *testing.T) {
+	mgr := NewManager(Config{
+		ChannelID: "sport-chan",
+		StatePath: filepath.Join(t.TempDir(), "test_badminton.json"),
+	}, nil)
+
+	// UserA reacts :cong1:, UserB reacts :tru1:
+	mgr.RecordReaction("sport-chan", "m0", "u_a", "anh.le", ":cong1:", false, 1)
+	mgr.RecordReaction("sport-chan", "m0", "u_b", "binh.tran", ":tru1:", false, 1)
+
+	// In chat, other users send messages but DO NOT react
+	mgr.RecordMessage("sport-chan", "m1", "u_c", "cuong.pham", "+1 em di nha")
+	mgr.RecordMessage("sport-chan", "m2", "u_d", "dung.hoang", "bận rồi xin off")
+	mgr.RecordMessage("sport-chan", "m3", "u_e", "em.nguyen", "Sân Minh Hải, Sân 6, khung giờ 19:30 - 21:30 (tối nay)")
+
+	summary := mgr.SummarizeMessages(context.Background(), mgr.state.Messages)
+
+	// Going must strictly be UserA only
+	if len(summary.Going) != 1 || !strings.Contains(summary.Going[0], "anh.le") {
+		t.Fatalf("expected strictly UserA in going, got: %v", summary.Going)
+	}
+
+	// NotGoing must strictly be UserB only
+	if len(summary.NotGoing) != 1 || !strings.Contains(summary.NotGoing[0], "binh.tran") {
+		t.Fatalf("expected strictly UserB in not going, got: %v", summary.NotGoing)
+	}
+
+	// Court info must be extracted from UserE's chat message
+	if !strings.Contains(summary.CourtInfo, "Minh Hải") || !strings.Contains(summary.CourtInfo, "Sân 6") {
+		t.Fatalf("expected court info to contain Minh Hải Sân 6, got: %q", summary.CourtInfo)
+	}
+
+	// Verify formatted output in GetSummary
+	text := mgr.GetSummary(context.Background())
+	if !strings.Contains(text, "Tham gia (1 người):") || !strings.Contains(text, "anh.le") {
+		t.Errorf("expected anh.le in GetSummary, got: %s", text)
+	}
+	if strings.Contains(text, "cuong.pham") {
+		t.Errorf("cuong.pham chatted +1 but did not react, must NOT appear in summary: %s", text)
+	}
+	if strings.Contains(text, "dung.hoang") {
+		t.Errorf("dung.hoang chatted off but did not react, must NOT appear in summary: %s", text)
+	}
+	if !strings.Contains(text, "Vắng mặt (1 người):") || !strings.Contains(text, "binh.tran") {
+		t.Errorf("expected binh.tran in absences: %s", text)
+	}
+	if !strings.Contains(text, "Sân 6") {
+		t.Errorf("expected Sân 6 in court info: %s", text)
+	}
+}
+
