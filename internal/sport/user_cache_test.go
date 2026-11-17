@@ -31,6 +31,34 @@ func TestUserRegistry_ResolutionAndAliases(t *testing.T) {
 		t.Errorf("expected 'dai.trinhduc' for alias 'dai.td', got %q", name)
 	}
 
+	// Test mapping for dphau29082002 -> hau.duongphuc
+	if name := reg.ResolveDisplayName("", "dphau29082002"); name != "hau.duongphuc" {
+		t.Errorf("expected 'hau.duongphuc', got %q", name)
+	}
+	if name := reg.ResolveDisplayName("1946197154334773248", "dphau29082002"); name != "hau.duongphuc" {
+		t.Errorf("expected 'hau.duongphuc' by UserID, got %q", name)
+	}
+
+	// Test mapping for ntdon1502 -> don.nguyenthanh
+	if name := reg.ResolveDisplayName("", "ntdon1502"); name != "don.nguyenthanh" {
+		t.Errorf("expected 'don.nguyenthanh', got %q", name)
+	}
+
+	// Test mapping for tridc1803 -> tri.dangcao
+	if name := reg.ResolveDisplayName("", "tridc1803"); name != "tri.dangcao" {
+		t.Errorf("expected 'tri.dangcao', got %q", name)
+	}
+
+	// Test mapping for toannguyen03.arc -> toan.nguyendinh
+	if name := reg.ResolveDisplayName("", "toannguyen03.arc"); name != "toan.nguyendinh" {
+		t.Errorf("expected 'toan.nguyendinh', got %q", name)
+	}
+
+	// Test mapping for hoang.nguyenviet2 -> hoang.nguyenviet2
+	if name := reg.ResolveDisplayName("", "hoang.nguyenviet2"); name != "hoang.nguyenviet2" {
+		t.Errorf("expected 'hoang.nguyenviet2', got %q", name)
+	}
+
 	// Test registering new profile
 	reg.Register("123456", "new.user", "Clan Hero", "Hero Display")
 	if name := reg.ResolveDisplayName("123456", "new.user"); name != "Clan Hero" {
