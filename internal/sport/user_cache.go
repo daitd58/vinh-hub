@@ -15,16 +15,13 @@ type UserProfile struct {
 	ClanNick    string `json:"clan_nick"`
 }
 
-// BestDisplayName returns ClanNick, fallback to DisplayName, fallback to Username.
+// BestDisplayName returns ClanNick if set, fallback to Username.
 func (p *UserProfile) BestDisplayName() string {
 	if p == nil {
 		return ""
 	}
 	if nick := strings.TrimSpace(p.ClanNick); nick != "" {
 		return nick
-	}
-	if disp := strings.TrimSpace(p.DisplayName); disp != "" {
-		return disp
 	}
 	return strings.TrimSpace(p.Username)
 }
@@ -39,29 +36,9 @@ type UserRegistry struct {
 	filePath      string
 }
 
-// Default known badminton clan member mappings for immediate availability.
-var defaultUserProfiles = []UserProfile{
-	{Username: "son.nguyentruong1", ClanNick: "Sơn Nguyễn Trường", DisplayName: "Sơn Nguyễn Trường"},
-	{Username: "dai.trinhduc", ClanNick: "Trịnh Đức Đại", DisplayName: "Đức Đại"},
-	{Username: "anh.leduc1", ClanNick: "Lê Đức Anh", DisplayName: "Lê Đức Anh"},
-	{Username: "dphau29082002", ClanNick: "Đới Phi Hậu", DisplayName: "Hậu Đới"},
-	{Username: "hau.duongphuc", ClanNick: "Đới Phi Hậu", DisplayName: "Đới Phi Hậu"},
-	{Username: "hoang.nguyenviet2", ClanNick: "Hoàng Nguyễn Việt", DisplayName: "Việt Hoàng"},
-	{Username: "ntdon1502", ClanNick: "Nguyễn Thành Đôn", DisplayName: "Đôn Nguyễn"},
-	{Username: "don.nguyenthanh", ClanNick: "Nguyễn Thành Đôn", DisplayName: "Nguyễn Thành Đôn"},
-	{Username: "tai.cumanhtuan", ClanNick: "Tài Cù Mạnh Tuấn", DisplayName: "Tài Cù Mạnh Tuấn"},
-	{Username: "toannguyen03.arc", ClanNick: "Nguyễn Đình Toàn", DisplayName: "Toàn Nguyễn"},
-	{Username: "toan.nguyendinh", ClanNick: "Nguyễn Đình Toàn", DisplayName: "Nguyễn Đình Toàn"},
-	{Username: "tuan.phamminh2", ClanNick: "Phạm Minh Tuấn", DisplayName: "Tuấn Phạm Minh"},
-	{Username: "chinh.nguyenduc", ClanNick: "Nguyễn Đức Chính", DisplayName: "Chính Nguyễn Đức"},
-	{Username: "hoang.nguyendinh", ClanNick: "Nguyễn Đình Hoàng", DisplayName: "Hoàng Nguyễn Đình"},
-	{Username: "tridc1803", ClanNick: "Đặng Cao Trí", DisplayName: "Trí Đặng Cao"},
-	{Username: "tri.dangcao", ClanNick: "Đặng Cao Trí", DisplayName: "Đặng Cao Trí"},
-	{Username: "son.lesytruong", ClanNick: "Lê Sỹ Trường Sơn", DisplayName: "Lê Sỹ Trường Sơn"},
-	{Username: "son.nguyenhoai", ClanNick: "Nguyễn Hoài Sơn", DisplayName: "Nguyễn Hoài Sơn"},
-	{Username: "ha.tranngan", ClanNick: "Trần Ngân Hà", DisplayName: "Hà Trần Ngân"},
-	{Username: "hieu.nguyendinh", ClanNick: "Nguyễn Đình Hiếu", DisplayName: "Hiếu Nguyễn Đình"},
-}
+// Default known badminton clan member mappings.
+// Keeps usernames/clan nicknames as-is without translating to real names.
+var defaultUserProfiles = []UserProfile{}
 
 // Known aliases mapping nicknames/emails to canonical usernames.
 var defaultAliases = map[string]string{
@@ -229,6 +206,9 @@ func (r *UserRegistry) ResolveDisplayName(userID, username string) string {
 		}
 	}
 
+	if clean != "" {
+		return clean
+	}
 	if username != "" {
 		return strings.TrimPrefix(username, "@")
 	}

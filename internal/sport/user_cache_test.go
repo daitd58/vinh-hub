@@ -9,26 +9,26 @@ import (
 func TestUserRegistry_ResolutionAndAliases(t *testing.T) {
 	reg := NewUserRegistry("")
 
-	// Test default profile resolution
-	if name := reg.ResolveDisplayName("", "son.nguyentruong1"); name != "Sơn Nguyễn Trường" {
-		t.Errorf("expected 'Sơn Nguyễn Trường', got %q", name)
+	// Test keeping username as-is (no mapping to real names)
+	if name := reg.ResolveDisplayName("", "son.nguyentruong1"); name != "son.nguyentruong1" {
+		t.Errorf("expected 'son.nguyentruong1', got %q", name)
 	}
 
-	// Test default alias resolution
-	if name := reg.ResolveDisplayName("", "son.nt"); name != "Sơn Nguyễn Trường" {
-		t.Errorf("expected 'Sơn Nguyễn Trường' for alias 'son.nt', got %q", name)
+	// Test alias resolution to canonical username
+	if name := reg.ResolveDisplayName("", "son.nt"); name != "son.nguyentruong1" {
+		t.Errorf("expected 'son.nguyentruong1' for alias 'son.nt', got %q", name)
 	}
 
-	if name := reg.ResolveDisplayName("", "sơn nt"); name != "Sơn Nguyễn Trường" {
-		t.Errorf("expected 'Sơn Nguyễn Trường' for alias 'sơn nt', got %q", name)
+	if name := reg.ResolveDisplayName("", "sơn nt"); name != "son.nguyentruong1" {
+		t.Errorf("expected 'son.nguyentruong1' for alias 'sơn nt', got %q", name)
 	}
 
-	if name := reg.ResolveDisplayName("", "dai.trinhduc"); name != "Trịnh Đức Đại" {
-		t.Errorf("expected 'Trịnh Đức Đại', got %q", name)
+	if name := reg.ResolveDisplayName("", "dai.trinhduc"); name != "dai.trinhduc" {
+		t.Errorf("expected 'dai.trinhduc', got %q", name)
 	}
 
-	if name := reg.ResolveDisplayName("", "dai.td"); name != "Trịnh Đức Đại" {
-		t.Errorf("expected 'Trịnh Đức Đại' for alias 'dai.td', got %q", name)
+	if name := reg.ResolveDisplayName("", "dai.td"); name != "dai.trinhduc" {
+		t.Errorf("expected 'dai.trinhduc' for alias 'dai.td', got %q", name)
 	}
 
 	// Test registering new profile
@@ -59,12 +59,12 @@ func TestBadminton_DeduplicationOfSonNT(t *testing.T) {
 
 	summary := mgr.SummarizeMessages(context.Background(), mgr.state.Messages)
 
-	// There should only be 1 attendee in Going, named "Sơn Nguyễn Trường"
+	// There should only be 1 attendee in Going, named "son.nguyentruong1"
 	if len(summary.Going) != 1 {
 		t.Fatalf("expected exactly 1 attendee (deduplicated), got %d: %v", len(summary.Going), summary.Going)
 	}
 
-	if summary.Going[0] != "Sơn Nguyễn Trường" {
-		t.Errorf("expected attendee 'Sơn Nguyễn Trường', got %q", summary.Going[0])
+	if summary.Going[0] != "son.nguyentruong1" {
+		t.Errorf("expected attendee 'son.nguyentruong1', got %q", summary.Going[0])
 	}
 }
