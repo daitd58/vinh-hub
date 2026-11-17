@@ -213,6 +213,9 @@ func (b *Bot) SetVinhHubManager(mgr *vinhhub.Manager) {
 // SendToChannel sends a message with optional mentions directly to a channel,
 // converting markdown bold tags (**) into Mezon `mk` spans and ensuring role mentions are highlighted.
 func (b *Bot) SendToChannel(ctx context.Context, channelID string, text string, opts *mezon.SendOptions) (string, error) {
+	if b == nil || b.client == nil {
+		return "", fmt.Errorf("bot client is not connected")
+	}
 	ch, err := b.client.Channels.Fetch(channelID)
 	if err != nil {
 		return "", fmt.Errorf("fetch channel %s: %w", channelID, err)
@@ -465,6 +468,9 @@ func (b *Bot) handleMessageReaction(ev *api.MessageReaction) {
 
 // SendToThread sends a message to a thread or fallback channel.
 func (b *Bot) SendToThread(ctx context.Context, channelID, threadID, text string) error {
+	if b == nil || b.client == nil {
+		return fmt.Errorf("bot client is not connected")
+	}
 	b.mu.RLock()
 	if threadID == "" {
 		threadID = b.threadID
@@ -1368,7 +1374,11 @@ func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
 		if len(paid) > 0 {
 			var names []string
 			for _, p := range paid {
-				names = append(names, "@"+p.Username)
+				disp := p.DisplayName
+				if disp == "" {
+					disp = p.Username
+				}
+				names = append(names, "@"+disp)
 			}
 			sb.WriteString(fmt.Sprintf("✅ **Đã ghi nhận đóng tiền:** %s 💵\n\n", strings.Join(names, ", ")))
 		}
@@ -1377,11 +1387,51 @@ func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
 		}
 		sb.WriteString(fmt.Sprintf("📊 **Tiến độ thu tiền:** %d/%d người (%s / %s VNĐ)",
 			paidCount, totalCount, fund.FormatVND(totalPaid), fund.FormatVND(totalCost)))
+		if paidCount == totalCount && totalCount > 0 {
+			sb.WriteString("\n🎉 *Toàn bộ thành viên đã hoàn tất đóng tiền! Cảm ơn cả nhà!* 🏸❤️")
+		}
 		_ = b.reply(m, sb.String())
 		return
 	}
 
-	// No args or bill-filter arg -> Show payment dashboard
+	// No user args provided (e.g. `*paid` or `*paid 1`):
+	// Check if sender can be self-confirmed on the bill
+	if m != nil {
+		senderID := m.SenderID
+		senderName := m.Username
+		clanNick := m.ClanNick
+		displayName := m.DisplayName
+
+		item, alreadyPaid, totalPaid, totalCost, paidCount, totalCount, err := sportMgr.MarkPaidSelf(senderID, senderName, clanNick, displayName, filter)
+		if err != nil {
+			_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
+			return
+		}
+
+		if item != nil {
+			disp := item.DisplayName
+			if disp == "" {
+				disp = item.Username
+			}
+			if alreadyPaid {
+				_ = b.reply(m, fmt.Sprintf("ℹ️ @%s đã được ghi nhận thanh toán trước đó rồi! 💵\n\n📊 **Tiến độ thu tiền:** %d/%d người (%s / %s VNĐ)",
+					disp, paidCount, totalCount, fund.FormatVND(totalPaid), fund.FormatVND(totalCost)))
+				return
+			}
+
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("✅ **Đã ghi nhận đóng tiền:** @%s 💵\n\n", disp))
+			sb.WriteString(fmt.Sprintf("📊 **Tiến độ thu tiền:** %d/%d người (%s / %s VNĐ)",
+				paidCount, totalCount, fund.FormatVND(totalPaid), fund.FormatVND(totalCost)))
+			if paidCount == totalCount && totalCount > 0 {
+				sb.WriteString("\n🎉 *Toàn bộ thành viên đã hoàn tất đóng tiền! Cảm ơn cả nhà!* 🏸❤️")
+			}
+			_ = b.reply(m, sb.String())
+			return
+		}
+	}
+
+	// No args or sender not in bill -> Show payment dashboard
 	bill, paid, unpaid, totalPaid, totalCost, err := sportMgr.GetBillStatus(filter)
 	if err != nil {
 		_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))

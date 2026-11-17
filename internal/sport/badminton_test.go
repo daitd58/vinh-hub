@@ -963,3 +963,65 @@ func TestAttendanceStrictlyFromReactionsAndCourtFromChat(t *testing.T) {
 	}
 }
 
+func TestMarkPaidSelf(t *testing.T) {
+	mgr := NewManager(Config{
+		ChannelID: "sport-chan",
+		StatePath: filepath.Join(t.TempDir(), "test_badminton.json"),
+	}, nil)
+
+	// Create a bill session with 2 participants
+	parts := []Participant{
+		{UserID: "u1", Username: "son.nguyentruong1", DisplayName: "son.nguyentruong1", Slots: 1},
+		{UserID: "u2", Username: "dai.trinhduc", DisplayName: "dai.trinhduc", Slots: 1},
+	}
+	bill, err := mgr.CreateMoneyBill(45000, parts...)
+	if err != nil {
+		t.Fatalf("CreateMoneyBill failed: %v", err)
+	}
+
+	// 1. Self-mark unpaid participant on active bill
+	item, alreadyPaid, totalPaid, totalCost, paidCount, totalCount, err := mgr.MarkPaidSelf("u1", "son.nguyentruong1", "", "")
+	if err != nil {
+		t.Fatalf("MarkPaidSelf failed: %v", err)
+	}
+	if item == nil || !item.Paid {
+		t.Fatalf("expected item to be marked paid")
+	}
+	if alreadyPaid {
+		t.Errorf("expected alreadyPaid to be false on first self-confirmation")
+	}
+	if paidCount != 1 || totalCount != 2 || totalPaid != 45000 || totalCost != 90000 {
+		t.Errorf("unexpected counts: paidCount=%d totalCount=%d totalPaid=%d totalCost=%d", paidCount, totalCount, totalPaid, totalCost)
+	}
+
+	// 2. Self-mark again: should report alreadyPaid = true
+	item2, alreadyPaid2, _, _, _, _, err := mgr.MarkPaidSelf("u1", "son.nguyentruong1", "", "")
+	if err != nil {
+		t.Fatalf("second MarkPaidSelf failed: %v", err)
+	}
+	if item2 == nil || !alreadyPaid2 {
+		t.Errorf("expected alreadyPaid=true on second call")
+	}
+
+	// 3. Self-mark on specific bill by Bill ID "1"
+	item3, alreadyPaid3, totalPaid3, _, paidCount3, _, err := mgr.MarkPaidSelf("u2", "dai.trinhduc", "", "", bill.ID)
+	if err != nil {
+		t.Fatalf("MarkPaidSelf with bill ID failed: %v", err)
+	}
+	if item3 == nil || !item3.Paid || alreadyPaid3 {
+		t.Errorf("expected item3 to be marked paid, alreadyPaid=false")
+	}
+	if paidCount3 != 2 || totalPaid3 != 90000 {
+		t.Errorf("expected full payment (2/2): paidCount=%d totalPaid=%d", paidCount3, totalPaid3)
+	}
+
+	// 4. Non-participant attempts self-confirm: should return nil item without error
+	item4, alreadyPaid4, _, _, _, _, err := mgr.MarkPaidSelf("u999", "stranger", "", "", bill.ID)
+	if err != nil {
+		t.Fatalf("MarkPaidSelf for stranger returned error: %v", err)
+	}
+	if item4 != nil || alreadyPaid4 {
+		t.Errorf("expected nil item and alreadyPaid=false for non-participant")
+	}
+}
+

@@ -1,10 +1,13 @@
 package bot
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
+	mezon "github.com/quangledang23/mezon-sdk-go"
 	"vinh-hub/internal/fund"
+	"vinh-hub/internal/sport"
 )
 
 func TestFormatBalanceReport(t *testing.T) {
@@ -163,5 +166,69 @@ func TestParseMonthYear(t *testing.T) {
 				t.Errorf("parseMonthYear(%q) = (%d, %d), want (%d, %d)", tc.input, m, y, tc.wantMonth, tc.wantYear)
 			}
 		}
+	}
+}
+
+func TestHandlePaidCommand_SelfConfirm(t *testing.T) {
+	tmpDir := t.TempDir()
+	sportMgr := sport.NewManager(sport.Config{
+		ChannelID: "sport-chan",
+		StatePath: filepath.Join(tmpDir, "badminton.json"),
+	}, nil)
+
+	parts := []sport.Participant{
+		{UserID: "u1", Username: "son.nguyentruong1", DisplayName: "son.nguyentruong1", Slots: 1},
+		{UserID: "u2", Username: "dai.trinhduc", DisplayName: "dai.trinhduc", Slots: 1},
+	}
+	_, err := sportMgr.CreateMoneyBill(45000, parts...)
+	if err != nil {
+		t.Fatalf("CreateMoneyBill failed: %v", err)
+	}
+
+	b := &Bot{
+		cfg:      Config{SportChannelID: "sport-chan"},
+		sportMgr: sportMgr,
+	}
+
+	// 1. Message from son.nguyentruong1: `*paid 1`
+	m := &mezon.ChannelMessage{
+		ChannelID: "sport-chan",
+		SenderID:  "u1",
+		Username:  "son.nguyentruong1",
+	}
+	b.handlePaidCommand(m, "*paid 1")
+
+	// Verify bill state: son.nguyentruong1 is now marked paid!
+	_, paid, unpaid, totalPaid, _, err := sportMgr.GetBillStatus("1")
+	if err != nil {
+		t.Fatalf("GetBillStatus failed: %v", err)
+	}
+	if len(paid) != 1 || paid[0].Username != "son.nguyentruong1" {
+		t.Errorf("expected son.nguyentruong1 to be paid, got: %v", paid)
+	}
+	if len(unpaid) != 1 || unpaid[0].Username != "dai.trinhduc" {
+		t.Errorf("expected dai.trinhduc to remain unpaid, got: %v", unpaid)
+	}
+	if totalPaid != 45000 {
+		t.Errorf("expected totalPaid 45k, got %d", totalPaid)
+	}
+
+	// 2. Typing `*paid 1` again when already paid should keep state intact
+	b.handlePaidCommand(m, "*paid 1")
+	_, paid2, _, _, _, _ := sportMgr.GetBillStatus("1")
+	if len(paid2) != 1 {
+		t.Errorf("expected still 1 paid, got %d", len(paid2))
+	}
+
+	// 3. Admin / stranger typing `*paid 1`: should not mark anyone paid
+	mStranger := &mezon.ChannelMessage{
+		ChannelID: "sport-chan",
+		SenderID:  "stranger_id",
+		Username:  "stranger",
+	}
+	b.handlePaidCommand(mStranger, "*paid 1")
+	_, paid3, _, _, _, _ := sportMgr.GetBillStatus("1")
+	if len(paid3) != 1 {
+		t.Errorf("stranger should not mark anyone paid, got %d", len(paid3))
 	}
 }

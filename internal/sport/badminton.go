@@ -2010,6 +2010,83 @@ func (m *Manager) MarkPaidByUserIDOrName(userID, username string) (*BillItem, bo
 	return item, ok
 }
 
+// MarkPaidSelf marks the sender as paid on the specified bill (or current active bill).
+// If the sender is found and was unpaid, it marks them as paid and returns (item, false, ...).
+// If the sender is found but was already paid, it returns (item, true, ...).
+// If the sender is not on the bill, it returns (nil, false, ...).
+func (m *Manager) MarkPaidSelf(userID, username, clanNick, displayName string, filter ...string) (item *BillItem, alreadyPaid bool, totalPaid int64, totalCost int64, paidCount int, totalCount int, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	f := ""
+	if len(filter) > 0 {
+		f = filter[0]
+	}
+	targetBill := m.findBillLocked(f)
+	if targetBill == nil || len(targetBill.Items) == 0 {
+		return nil, false, 0, 0, 0, 0, fmt.Errorf("chưa có hoá đơn nào đang mở. Dùng `*split` hoặc `*money` để tạo hoá đơn")
+	}
+
+	// 1. Try matching by UserID if available
+	var matched *BillItem
+	if userID != "" {
+		if it, ok := targetBill.Items[userID]; ok {
+			matched = it
+		}
+	}
+
+	// 2. If not matched yet, try candidate names (username, clanNick, displayName, resolved name)
+	if matched == nil {
+		candidates := []string{username, clanNick, displayName}
+		if userID != "" {
+			candidates = append(candidates, m.ResolveDisplayName(userID, username))
+		}
+		for _, cand := range candidates {
+			clean := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(cand), "@"))
+			if clean == "" {
+				continue
+			}
+			for _, it := range targetBill.Items {
+				uLower := strings.ToLower(strings.TrimPrefix(it.Username, "@"))
+				dLower := strings.ToLower(strings.TrimPrefix(it.DisplayName, "@"))
+				if uLower == clean || dLower == clean || it.UserID == clean {
+					matched = it
+					break
+				}
+			}
+			if matched != nil {
+				break
+			}
+		}
+	}
+
+	for _, it := range targetBill.Items {
+		totalCost += it.Amount
+		if it.Paid {
+			totalPaid += it.Amount
+			paidCount++
+		}
+	}
+	totalCount = len(targetBill.Items)
+
+	if matched == nil {
+		return nil, false, totalPaid, totalCost, paidCount, totalCount, nil
+	}
+
+	if matched.Paid {
+		return matched, true, totalPaid, totalCost, paidCount, totalCount, nil
+	}
+
+	now := time.Now().In(m.cfg.Timezone)
+	matched.Paid = true
+	matched.PaidAt = &now
+	totalPaid += matched.Amount
+	paidCount++
+
+	m.saveStateLocked()
+	return matched, false, totalPaid, totalCost, paidCount, totalCount, nil
+}
+
 // MarkPaidBatch marks one or more members as paid on the active bill or a specific date bill.
 func (m *Manager) MarkPaidBatch(names []string, filter ...string) (paidItems []*BillItem, notFound []string, totalPaid int64, totalCost int64, paidCount int, totalCount int, err error) {
 	m.mu.Lock()
