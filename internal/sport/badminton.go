@@ -1089,9 +1089,11 @@ func (m *Manager) ConfirmMatch(ctx context.Context, userID, username, args strin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	var dateSpecified bool
 	if args != "" {
-		d, dt, tm, c, dateSpecified, err := ParseMatchSchedule(args, now, m.cfg.Timezone)
+		d, dt, tm, c, spec, err := ParseMatchSchedule(args, now, m.cfg.Timezone)
 		if err == nil {
+			dateSpecified = spec
 			if dateSpecified {
 				m.state.MatchDay = d
 				m.state.MatchDate = dt
@@ -1101,6 +1103,21 @@ func (m *Manager) ConfirmMatch(ctx context.Context, userID, username, args strin
 			}
 			if c != "" {
 				m.state.CourtBooked = c
+			}
+		}
+
+		// If regex did not extract court or time, call LLM specifically on admin's confirm text
+		if (m.state.CourtBooked == "" || m.state.MatchTime == "") && (m.cfg.OpenAIKey != "" || m.cfg.GeminiKey != "") {
+			aiCourt, aiTime, aiDate, aiDay := m.callParseAdminConfirmAI(ctx, args, now)
+			if m.state.CourtBooked == "" && aiCourt != "" {
+				m.state.CourtBooked = aiCourt
+			}
+			if m.state.MatchTime == "" && aiTime != "" {
+				m.state.MatchTime = aiTime
+			}
+			if !dateSpecified && aiDate != "" {
+				m.state.MatchDate = aiDate
+				m.state.MatchDay = aiDay
 			}
 		}
 	}
@@ -1353,34 +1370,14 @@ func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecor
 		}
 	}
 
-	// 2. Court info extracted from messages (AI preferred, fallback to NLP)
+	// 2. Court info: only local (no LLM calls)
 	courtInfo := ""
 	var notes []string
 
 	if len(messages) > 0 {
-		if m.cfg.OpenAIKey != "" {
-			aiCourt, err := m.callOpenAICourtInfo(ctx, messages)
-			if err == nil && strings.TrimSpace(aiCourt) != "" {
-				courtInfo = cleanCourtOutput(aiCourt)
-			} else if err != nil {
-				m.log.Warn("failed to call openai court extraction, falling back", "err", err)
-			}
-		}
-
-		if courtInfo == "" && m.cfg.GeminiKey != "" {
-			aiCourt, err := m.callGeminiCourtInfo(ctx, messages)
-			if err == nil && strings.TrimSpace(aiCourt) != "" {
-				courtInfo = cleanCourtOutput(aiCourt)
-			} else if err != nil {
-				m.log.Warn("failed to call gemini court extraction, falling back", "err", err)
-			}
-		}
-
-		if courtInfo == "" {
-			nlpRes := m.ParseMessagesNLP(messages)
-			courtInfo = nlpRes.CourtInfo
-			notes = nlpRes.Notes
-		}
+		nlpRes := m.ParseMessagesNLP(messages)
+		courtInfo = nlpRes.CourtInfo
+		notes = nlpRes.Notes
 	}
 
 	if courtInfo == "" {
@@ -1720,6 +1717,217 @@ func (m *Manager) callGeminiCourtInfo(ctx context.Context, messages []MessageRec
 
 func (m *Manager) callGeminiSummary(ctx context.Context, messages []MessageRecord, goingReactions, notGoingReactions []string) (string, error) {
 	return m.callGeminiCourtInfo(ctx, messages)
+}
+
+func parseAIConfirmJSON(rawContent string) (court, matchTime, matchDate string, err error) {
+	rawContent = strings.TrimSpace(rawContent)
+	rawContent = strings.TrimPrefix(rawContent, "```json")
+	rawContent = strings.TrimPrefix(rawContent, "```")
+	rawContent = strings.TrimSuffix(rawContent, "```")
+	rawContent = strings.TrimSpace(rawContent)
+
+	var res struct {
+		Court string `json:"court"`
+		Time  string `json:"time"`
+		Date  string `json:"date"`
+	}
+	if err := json.Unmarshal([]byte(rawContent), &res); err != nil {
+		return "", "", "", fmt.Errorf("failed to parse json %q: %w", rawContent, err)
+	}
+
+	court = strings.TrimSpace(res.Court)
+	if court != "" && !strings.HasPrefix(strings.ToLower(court), "sân") && !strings.HasPrefix(strings.ToLower(court), "san") {
+		court = "Sân " + court
+	}
+	matchTime = strings.TrimSpace(res.Time)
+	matchDate = strings.TrimSpace(res.Date)
+	return court, matchTime, matchDate, nil
+}
+
+// callParseAdminConfirmAI uses OpenAI or Gemini to extract court, time, and date from admin's confirm message.
+func (m *Manager) callParseAdminConfirmAI(ctx context.Context, adminText string, now time.Time) (court, matchTime, matchDate, matchDay string) {
+	if strings.TrimSpace(adminText) == "" {
+		return "", "", "", ""
+	}
+
+	// 1. Try OpenAI if configured
+	if m.cfg.OpenAIKey != "" {
+		c, tm, dt, err := m.callOpenAIConfirmParser(ctx, adminText, now)
+		if err == nil && (c != "" || tm != "" || dt != "") {
+			court, matchTime, matchDate = c, tm, dt
+		} else if err != nil {
+			m.log.Warn("openai confirm parser failed", "err", err)
+		}
+	}
+
+	// 2. Fallback to Gemini if configured
+	if (court == "" && matchTime == "") && m.cfg.GeminiKey != "" {
+		c, tm, dt, err := m.callGeminiConfirmParser(ctx, adminText, now)
+		if err == nil && (c != "" || tm != "" || dt != "") {
+			court, matchTime, matchDate = c, tm, dt
+		} else if err != nil {
+			m.log.Warn("gemini confirm parser failed", "err", err)
+		}
+	}
+
+	if matchDate != "" {
+		if t, err := time.ParseInLocation("02/01/2006", matchDate, m.cfg.Timezone); err == nil {
+			matchDay = DayOfWeekVietnamese(t.Weekday())
+		}
+	}
+
+	return court, matchTime, matchDate, matchDay
+}
+
+func (m *Manager) callOpenAIConfirmParser(ctx context.Context, adminText string, now time.Time) (court, matchTime, matchDate string, err error) {
+	baseURL := m.cfg.OpenAIBaseURL
+	if baseURL == "" {
+		baseURL = "https://llm.mrdnd.dev/v1"
+	}
+	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
+
+	model := m.cfg.OpenAIModel
+	if model == "" {
+		model = "gpt-4o-mini"
+	}
+
+	systemPrompt := fmt.Sprintf(
+		"Bạn là trợ lý cho câu lạc bộ cầu lông Vinh-CL. Nhiệm vụ của bạn là đọc nội dung lệnh xác nhận chốt lịch thi đấu từ quản trị viên và trích xuất thông tin dưới dạng JSON.\n"+
+			"Hôm nay là: %s (%s).\n"+
+			"QUY TẮC TRÍCH XUẤT:\n"+
+			"1. court: Tên sân bãi hoặc địa chỉ sân (ví dụ: 'Sân KT1 (đối diện Bệnh viện Mắt Sài Gòn)', 'Sân 3', 'Sân Minh Hải'). Nếu không có sân để chuỗi rỗng \"\".\n"+
+			"2. time: Khung giờ hoặc giờ đánh (ví dụ: '19:00 - 21:30', '19:30', '18:00'). Nếu không có để chuỗi rỗng \"\".\n"+
+			"3. date: Ngày thi đấu định dạng DD/MM/YYYY (dựa trên ngày hôm nay %s nếu là tối nay, ngày mai, thứ trong tuần...). Nếu không có để chuỗi rỗng \"\".\n"+
+			"Trả về DUY NHẤT một JSON hợp lệ dạng: {\"court\":\"...\",\"time\":\"...\",\"date\":\"...\"}",
+		now.Format("02/01/2006"), DayOfWeekVietnamese(now.Weekday()), now.Format("02/01/2006"),
+	)
+
+	payload := map[string]any{
+		"model": model,
+		"messages": []map[string]string{
+			{
+				"role":    "system",
+				"content": systemPrompt,
+			},
+			{
+				"role":    "user",
+				"content": adminText,
+			},
+		},
+		"temperature": 0.1,
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if m.cfg.OpenAIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+m.cfg.OpenAIKey)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", "", "", fmt.Errorf("openai api HTTP %d: %s", resp.StatusCode, string(b))
+	}
+
+	var openAIResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&openAIResp); err != nil {
+		return "", "", "", err
+	}
+
+	if len(openAIResp.Choices) == 0 {
+		return "", "", "", fmt.Errorf("empty openai choices response")
+	}
+
+	return parseAIConfirmJSON(openAIResp.Choices[0].Message.Content)
+}
+
+func (m *Manager) callGeminiConfirmParser(ctx context.Context, adminText string, now time.Time) (court, matchTime, matchDate string, err error) {
+	prompt := fmt.Sprintf(
+		"Bạn là trợ lý cho câu lạc bộ cầu lông Vinh-CL. Nhiệm vụ của bạn là đọc nội dung lệnh xác nhận chốt lịch thi đấu từ quản trị viên và trích xuất thông tin dưới dạng JSON.\n"+
+			"Hôm nay là: %s (%s).\n"+
+			"QUY TẮC TRÍCH XUẤT:\n"+
+			"1. court: Tên sân bãi hoặc địa chỉ sân (ví dụ: 'Sân KT1 (đối diện Bệnh viện Mắt Sài Gòn)', 'Sân 3', 'Sân Minh Hải'). Nếu không có sân để chuỗi rỗng \"\".\n"+
+			"2. time: Khung giờ hoặc giờ đánh (ví dụ: '19:00 - 21:30', '19:30', '18:00'). Nếu không có để chuỗi rỗng \"\".\n"+
+			"3. date: Ngày thi đấu định dạng DD/MM/YYYY (dựa trên ngày hôm nay %s nếu là tối nay, ngày mai, thứ trong tuần...). Nếu không có để chuỗi rỗng \"\".\n"+
+			"Nội dung lệnh của quản trị viên: %s\n\n"+
+			"Trả về DUY NHẤT một JSON hợp lệ dạng: {\"court\":\"...\",\"time\":\"...\",\"date\":\"...\"}",
+		now.Format("02/01/2006"), DayOfWeekVietnamese(now.Weekday()), now.Format("02/01/2006"), adminText,
+	)
+
+	payload := map[string]any{
+		"contents": []map[string]any{
+			{
+				"parts": []map[string]string{
+					{"text": prompt},
+				},
+			},
+		},
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=%s", m.cfg.GeminiKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", "", "", fmt.Errorf("gemini api HTTP %d: %s", resp.StatusCode, string(b))
+	}
+
+	var geminiResp struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err != nil {
+		return "", "", "", err
+	}
+
+	if len(geminiResp.Candidates) == 0 || len(geminiResp.Candidates[0].Content.Parts) == 0 {
+		return "", "", "", fmt.Errorf("empty gemini response")
+	}
+
+	return parseAIConfirmJSON(geminiResp.Candidates[0].Content.Parts[0].Text)
 }
 
 func (m *Manager) sendWithRoleMention(ctx context.Context, text string) (string, error) {

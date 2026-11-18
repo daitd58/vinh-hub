@@ -276,7 +276,7 @@ func TestManager_OpenAISummary(t *testing.T) {
 				{
 					"message": map[string]string{
 						"role":    "assistant",
-						"content": "• ✅ **Tham gia (2 người):** a.nguyen, b.tran\n• ❌ **Vắng mặt:** c.le\n• 🏟️ **Sân bãi:** Sân Minh Hải 19:30",
+						"content": `{"court":"Sân Minh Hải","time":"19:30","date":"18/11/2026"}`,
 					},
 				},
 			},
@@ -292,19 +292,30 @@ func TestManager_OpenAISummary(t *testing.T) {
 		ChannelID:     "test-chan",
 		RoleID:        "1840693979155271680",
 		RoleName:      "Vinh-CL",
+		AdminUserIDs:  []string{"admin_id"},
 		StatePath:     t.TempDir() + "/badminton.json",
 		OpenAIKey:     "test-key",
 		OpenAIBaseURL: ts.URL,
 		OpenAIModel:   "gpt-4o-mini",
 	}, sender)
 
-	mgr.RecordMessage("test-chan", "m1", "u1", "a.nguyen", "+1")
-	mgr.RecordMessage("test-chan", "m2", "u2", "b.tran", "+1")
-	mgr.RecordMessage("test-chan", "m3", "u3", "c.le", "bận")
+	court, tm, dt, err := mgr.callOpenAIConfirmParser(context.Background(), "nay danh san Minh Hai luc 19:30", time.Now())
+	if err != nil {
+		t.Fatalf("callOpenAIConfirmParser failed: %v", err)
+	}
+	if court != "Sân Minh Hải" || tm != "19:30" || dt != "18/11/2026" {
+		t.Errorf("unexpected parse result: court=%s, time=%s, date=%s", court, tm, dt)
+	}
 
-	summary := mgr.SummarizeMessages(context.Background(), mgr.state.Messages)
-	if !strings.Contains(summary.RawAI, "Sân Minh Hải 19:30") {
-		t.Errorf("expected OpenAI response in RawAI, got %q", summary.RawAI)
+	// Also verify ConfirmMatch utilizes this AI parser fallback when regex does not find the court word
+	mgr.state.CourtBooked = ""
+	mgr.state.MatchTime = ""
+	_, err = mgr.ConfirmMatch(context.Background(), "admin_id", "dai.trinhduc", "ở địa điểm Minh Hải lúc 19:30")
+	if err != nil {
+		t.Fatalf("ConfirmMatch with AI failed: %v", err)
+	}
+	if mgr.state.CourtBooked != "Sân Minh Hải" {
+		t.Errorf("expected court 'Sân Minh Hải', got %q", mgr.state.CourtBooked)
 	}
 }
 
