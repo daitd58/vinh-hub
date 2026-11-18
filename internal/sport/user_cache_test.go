@@ -59,6 +59,29 @@ func TestUserRegistry_ResolutionAndAliases(t *testing.T) {
 		t.Errorf("expected 'hoang.nguyenviet2', got %q", name)
 	}
 
+	// Test Vietnamese real names mapping to canonical clan nicknames
+	vietnameseTests := []struct {
+		input    string
+		expected string
+	}{
+		{"Nguyễn Thành Đôn", "don.nguyenthanh"},
+		{"Đới Phi Hậu", "hau.duongphuc"},
+		{"Nguyễn Đình Toàn", "toan.nguyendinh"},
+		{"Phạm Minh Tuấn", "tuan.phamminh2"},
+		{"Đặng Cao Trí", "tri.dangcao"},
+		{"Hoàng Nguyễn Việt", "hoang.nguyenviet2"},
+		{"Trịnh Đức Đại", "dai.trinhduc"},
+		{"Lê Đức Anh", "anh.leduc1"},
+		{"Sơn Nguyễn Trường", "son.nguyentruong1"},
+		{"Chu Gia", "gia.chuvan"},
+		{"Sinh Hải", "hai.nguyensinh"},
+	}
+	for _, tc := range vietnameseTests {
+		if name := reg.ResolveDisplayName("", tc.input); name != tc.expected {
+			t.Errorf("ResolveDisplayName('', %q) = %q; want %q", tc.input, name, tc.expected)
+		}
+	}
+
 	// Test registering new profile
 	reg.Register("123456", "new.user", "Clan Hero", "Hero Display")
 	if name := reg.ResolveDisplayName("123456", "new.user"); name != "Clan Hero" {
@@ -66,6 +89,12 @@ func TestUserRegistry_ResolutionAndAliases(t *testing.T) {
 	}
 	if name := reg.ResolveDisplayName("", "new.user"); name != "Clan Hero" {
 		t.Errorf("expected 'Clan Hero' by username, got %q", name)
+	}
+
+	// Test that registering a real name for a known user cannot overwrite their canonical clan nick
+	reg.Register("1946167706600345600", "ntdon1502", "Nguyễn Thành Đôn", "Nguyễn Thành Đôn")
+	if name := reg.ResolveDisplayName("1946167706600345600", "ntdon1502"); name != "don.nguyenthanh" {
+		t.Errorf("expected canonical 'don.nguyenthanh', got %q", name)
 	}
 
 	// Test fallback for unknown user

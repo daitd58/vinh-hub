@@ -317,6 +317,51 @@ func (m *Manager) loadState() {
 					}
 				}
 			}
+
+			// Retroactive sanitization of historical and cached state
+			if m.registry != nil {
+				for i := range s.MatchHistory {
+					for j := range s.MatchHistory[i].Attendees {
+						att := &s.MatchHistory[i].Attendees[j]
+						att.Username = m.registry.ResolveDisplayName(att.UserID, att.Username)
+						att.DisplayName = m.registry.ResolveDisplayName(att.UserID, att.DisplayName)
+					}
+					for j := range s.MatchHistory[i].Absentees {
+						s.MatchHistory[i].Absentees[j] = m.registry.ResolveDisplayName("", s.MatchHistory[i].Absentees[j])
+					}
+				}
+				for uid, uname := range s.ReactionsGoing {
+					s.ReactionsGoing[uid] = m.registry.ResolveDisplayName(uid, uname)
+				}
+				for uid, uname := range s.ReactionsNotGoing {
+					s.ReactionsNotGoing[uid] = m.registry.ResolveDisplayName(uid, uname)
+				}
+				for uid, p := range s.GoingParticipants {
+					p.Username = m.registry.ResolveDisplayName(p.UserID, p.Username)
+					p.DisplayName = m.registry.ResolveDisplayName(p.UserID, p.DisplayName)
+					s.GoingParticipants[uid] = p
+				}
+				for i := range s.PreviousMatchParticipants {
+					p := &s.PreviousMatchParticipants[i]
+					p.Username = m.registry.ResolveDisplayName(p.UserID, p.Username)
+					p.DisplayName = m.registry.ResolveDisplayName(p.UserID, p.DisplayName)
+				}
+				for i := range s.BillHistory {
+					for k, it := range s.BillHistory[i].Items {
+						it.Username = m.registry.ResolveDisplayName(it.UserID, it.Username)
+						it.DisplayName = m.registry.ResolveDisplayName(it.UserID, it.DisplayName)
+						s.BillHistory[i].Items[k] = it
+					}
+				}
+				if s.CurrentBill != nil {
+					for k, it := range s.CurrentBill.Items {
+						it.Username = m.registry.ResolveDisplayName(it.UserID, it.Username)
+						it.DisplayName = m.registry.ResolveDisplayName(it.UserID, it.DisplayName)
+						s.CurrentBill.Items[k] = it
+					}
+				}
+			}
+
 			m.state = s
 			m.log.Info("loaded badminton attendance state",
 				"session", s.SessionID, "messages", len(s.Messages),
@@ -395,16 +440,16 @@ func (m *Manager) RecordReaction(channelID, messageID, userID, username, emoji s
 		}
 	} else {
 		if isGoing {
-			m.state.ReactionsGoing[userID] = rawUsername
+			m.state.ReactionsGoing[userID] = displayName
 			m.state.GoingParticipants[userID] = Participant{
 				UserID:      userID,
-				Username:    rawUsername,
+				Username:    displayName,
 				DisplayName: displayName,
 				Slots:       slots,
 			}
 			delete(m.state.ReactionsNotGoing, userID)
 		} else if isNotGoing {
-			m.state.ReactionsNotGoing[userID] = rawUsername
+			m.state.ReactionsNotGoing[userID] = displayName
 			delete(m.state.ReactionsGoing, userID)
 			delete(m.state.GoingParticipants, userID)
 		}
@@ -433,6 +478,9 @@ func (m *Manager) RecordMessage(channelID, msgID, userID, username, content stri
 		m.RegisterUser(userID, username, clanNick, "")
 	}
 	displayName := m.ResolveDisplayName(userID, username)
+	if displayName == "" {
+		displayName = username
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -440,7 +488,7 @@ func (m *Manager) RecordMessage(channelID, msgID, userID, username, content stri
 	rec := MessageRecord{
 		ID:          msgID,
 		UserID:      userID,
-		Username:    username,
+		Username:    displayName,
 		DisplayName: displayName,
 		Content:     content,
 		Timestamp:   time.Now(),
@@ -1024,8 +1072,13 @@ func (m *Manager) ConfirmMatch(ctx context.Context, userID, username, args strin
 		m.state.MatchTime = mTime
 	}
 
+	dispUser := m.ResolveDisplayName(userID, username)
+	if dispUser == "" {
+		dispUser = username
+	}
+
 	m.state.Confirmed = true
-	m.state.ConfirmedBy = username
+	m.state.ConfirmedBy = dispUser
 	m.state.ConfirmedAt = &now
 	m.saveStateLocked()
 
@@ -1049,7 +1102,7 @@ func (m *Manager) ConfirmMatch(ctx context.Context, userID, username, args strin
 			"• 👥 **Số người tham gia hiện tại:** %d người\n\n"+
 			"👉 Bot sẽ gửi thông báo nhắc trước **1 tiếng** cho mọi người chuẩn bị đồ nhé! 🔥",
 		strings.ToUpper(m.state.MatchDay), m.state.MatchDate,
-		username, tag,
+		dispUser, tag,
 		m.state.MatchDay, m.state.MatchDate,
 		m.state.MatchTime,
 		courtStr,
@@ -1064,6 +1117,11 @@ func (m *Manager) ConfirmMatch(ctx context.Context, userID, username, args strin
 func (m *Manager) CancelMatch(ctx context.Context, userID, username string) (string, error) {
 	if !m.IsAdmin(userID) {
 		return "", fmt.Errorf("bạn không có quyền hủy lịch thi đấu. Chỉ quản trị viên mới có thể hủy lịch")
+	}
+
+	dispUser := m.ResolveDisplayName(userID, username)
+	if dispUser == "" {
+		dispUser = username
 	}
 
 	m.mu.Lock()
@@ -1084,7 +1142,7 @@ func (m *Manager) CancelMatch(ctx context.Context, userID, username string) (str
 			"Chào %s, Quản trị viên @%s đã **hủy buổi đánh cầu** ngày %s (%s).\n"+
 			"Bot sẽ không gửi tin nhắc lịch cho buổi này nữa.",
 		strings.ToUpper(day), date,
-		tag, username, day, date,
+		tag, dispUser, day, date,
 	)
 
 	_, err := m.sendWithRoleMention(ctx, msg)
@@ -1176,9 +1234,9 @@ func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecor
 	// 1. Attendance strictly from reactions
 	if len(m.state.GoingParticipants) > 0 {
 		for _, p := range m.state.GoingParticipants {
-			disp := p.DisplayName
+			disp := m.ResolveDisplayName(p.UserID, p.Username)
 			if disp == "" {
-				disp = m.ResolveDisplayName(p.UserID, p.Username)
+				disp = m.ResolveDisplayName(p.UserID, p.DisplayName)
 			}
 			if disp == "" {
 				disp = p.Username
@@ -1289,9 +1347,12 @@ func parseMessagesNLPInternal(messages []MessageRecord, resolver func(userID, us
 	reCourt := regexp.MustCompile(`(?i)(sân\s+\d+|san\s+\d+|sân\s+[a-zA-Z0-9\s]+|Minh Hải|minh hai|đặt sân|chưa có sân|k có sân|không có sân|full sân|hết sân)`)
 
 	for _, msg := range messages {
-		name := msg.DisplayName
-		if name == "" && resolver != nil {
+		name := ""
+		if resolver != nil {
 			name = resolver(msg.UserID, msg.Username)
+		}
+		if name == "" {
+			name = msg.DisplayName
 		}
 		if name == "" {
 			name = msg.Username
@@ -1416,9 +1477,12 @@ func (m *Manager) buildTranscript(messages []MessageRecord, goingReactions, notG
 func (m *Manager) buildMessagesTranscript(messages []MessageRecord) string {
 	var sb strings.Builder
 	for _, msg := range messages {
-		name := msg.DisplayName
+		name := m.ResolveDisplayName(msg.UserID, msg.Username)
 		if name == "" {
-			name = m.ResolveDisplayName(msg.UserID, msg.Username)
+			name = msg.DisplayName
+		}
+		if name == "" {
+			name = msg.Username
 		}
 		sb.WriteString(fmt.Sprintf("- %s: %s\n", name, msg.Content))
 	}
@@ -2075,13 +2139,16 @@ func (m *Manager) CreateSplitBill(expr string, customParticipants ...Participant
 	items := make(map[string]*BillItem)
 	for _, p := range participants {
 		userAmount := int64(p.Slots) * slotPrice
-		disp := p.DisplayName
+		disp := m.ResolveDisplayName(p.UserID, p.Username)
 		if disp == "" {
-			disp = m.ResolveDisplayName(p.UserID, p.Username)
+			disp = m.ResolveDisplayName(p.UserID, p.DisplayName)
+		}
+		if disp == "" {
+			disp = p.Username
 		}
 		items[p.UserID] = &BillItem{
 			UserID:      p.UserID,
-			Username:    p.Username,
+			Username:    disp,
 			DisplayName: disp,
 			Slots:       p.Slots,
 			Amount:      userAmount,
@@ -2162,13 +2229,16 @@ func (m *Manager) CreateMoneyBill(unitAmount int, customParticipants ...Particip
 	items := make(map[string]*BillItem)
 	for _, p := range participants {
 		userAmount := int64(p.Slots) * slotPrice
-		disp := p.DisplayName
+		disp := m.ResolveDisplayName(p.UserID, p.Username)
 		if disp == "" {
-			disp = m.ResolveDisplayName(p.UserID, p.Username)
+			disp = m.ResolveDisplayName(p.UserID, p.DisplayName)
+		}
+		if disp == "" {
+			disp = p.Username
 		}
 		items[p.UserID] = &BillItem{
 			UserID:      p.UserID,
-			Username:    p.Username,
+			Username:    disp,
 			DisplayName: disp,
 			Slots:       p.Slots,
 			Amount:      userAmount,
@@ -2841,8 +2911,8 @@ func (m *Manager) GetLeaderboardText(monthInput string, now time.Time) (string, 
 	}
 
 	statsMap := make(map[string]*statsHolder)
-	getStats := func(uname string) *statsHolder {
-		disp := m.ResolveDisplayName("", uname)
+	getStats := func(uid, uname string) *statsHolder {
+		disp := m.ResolveDisplayName(uid, uname)
 		key := strings.ToLower(disp)
 		if s, ok := statsMap[key]; ok {
 			return s
@@ -2855,12 +2925,12 @@ func (m *Manager) GetLeaderboardText(monthInput string, now time.Time) (string, 
 	totalMatches := len(monthMatches)
 	for _, match := range monthMatches {
 		for _, att := range match.Attendees {
-			s := getStats(att.Username)
+			s := getStats(att.UserID, att.Username)
 			s.matches++
 			s.slots += att.Slots
 		}
 		for _, abs := range match.Absentees {
-			s := getStats(abs)
+			s := getStats("", abs)
 			s.absentCount++
 		}
 	}

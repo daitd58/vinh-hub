@@ -220,7 +220,7 @@ func TestHandlePaidCommand_SelfConfirm(t *testing.T) {
 		t.Errorf("expected still 1 paid, got %d", len(paid2))
 	}
 
-	// 3. Admin / stranger typing `*paid 1`: should not mark anyone paid
+	// 3. Stranger attempts self-paid: not in bill -> no-op
 	mStranger := &mezon.ChannelMessage{
 		ChannelID: "sport-chan",
 		SenderID:  "stranger_id",
@@ -230,6 +230,39 @@ func TestHandlePaidCommand_SelfConfirm(t *testing.T) {
 	_, paid3, _, _, _, _ := sportMgr.GetBillStatus("1")
 	if len(paid3) != 1 {
 		t.Errorf("stranger should not mark anyone paid, got %d", len(paid3))
+	}
+
+	// 4. Stranger tries to tag someone else in *paid: should be rejected
+	b.handlePaidCommand(mStranger, "*paid 1 @dai.trinhduc")
+	_, _, unpaid4, _, _, _ := sportMgr.GetBillStatus("1")
+	if len(unpaid4) != 1 {
+		t.Errorf("stranger should not be permitted to tag other users in *paid")
+	}
+
+	// 5. Admin tags someone in *paid: should be permitted
+	mAdmin := &mezon.ChannelMessage{
+		ChannelID: "sport-chan",
+		SenderID:  "1783440675396653056",
+		Username:  "dai.trinhduc",
+	}
+	b.handlePaidCommand(mAdmin, "*paid 1 @dai.trinhduc")
+	_, paid5, unpaid5, _, _, _ := sportMgr.GetBillStatus("1")
+	if len(paid5) != 2 || len(unpaid5) != 0 {
+		t.Errorf("admin should be able to tag and mark other users as paid, got paid=%d, unpaid=%d", len(paid5), len(unpaid5))
+	}
+
+	// 6. Stranger tries to unmark via *unpaid @user: should be rejected
+	b.handleUnpaidCommand(mStranger, "*unpaid 1 @dai.trinhduc")
+	_, paid6, _, _, _, _ := sportMgr.GetBillStatus("1")
+	if len(paid6) != 2 {
+		t.Errorf("stranger should not be permitted to unmark users via *unpaid")
+	}
+
+	// 7. Admin unmarks via *unpaid @user: should be permitted
+	b.handleUnpaidCommand(mAdmin, "*unpaid 1 @dai.trinhduc")
+	_, paid7, unpaid7, _, _, _ := sportMgr.GetBillStatus("1")
+	if len(paid7) != 1 || len(unpaid7) != 1 {
+		t.Errorf("admin should be able to unmark users via *unpaid, got paid=%d, unpaid=%d", len(paid7), len(unpaid7))
 	}
 }
 
@@ -279,5 +312,42 @@ func TestHandleConfirmAndCancelCommand_Permissions(t *testing.T) {
 	b.handleCancelCommand(mAdmin)
 	if sportMgr.IsConfirmed() {
 		t.Errorf("admin cancel should set confirmed to false")
+	}
+}
+
+func TestHandleRegisterQRCommand_Permissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	sportMgr := sport.NewManager(sport.Config{
+		ChannelID:    "sport-chan",
+		AdminUserIDs: []string{"1783440675396653056"},
+		StatePath:    filepath.Join(tmpDir, "badminton.json"),
+		PaymentQR:    "https://initial-qr.png",
+	}, nil)
+
+	b := &Bot{
+		cfg:      Config{SportChannelID: "sport-chan"},
+		sportMgr: sportMgr,
+	}
+
+	// 1. Non-admin tries to register qr: should fail
+	mStranger := &mezon.ChannelMessage{
+		ChannelID: "sport-chan",
+		SenderID:  "stranger_id",
+		Username:  "stranger",
+	}
+	b.handleRegisterQRCommand(mStranger, "*register qr https://fake-qr.png")
+	if sportMgr.GetPaymentQR() != "https://initial-qr.png" {
+		t.Errorf("stranger should not be able to change payment QR, got %s", sportMgr.GetPaymentQR())
+	}
+
+	// 2. Admin registers qr: should succeed
+	mAdmin := &mezon.ChannelMessage{
+		ChannelID: "sport-chan",
+		SenderID:  "1783440675396653056",
+		Username:  "dai.trinhduc",
+	}
+	b.handleRegisterQRCommand(mAdmin, "*register qr https://new-admin-qr.png")
+	if sportMgr.GetPaymentQR() != "https://new-admin-qr.png" {
+		t.Errorf("admin should be able to update payment QR, got %s", sportMgr.GetPaymentQR())
 	}
 }

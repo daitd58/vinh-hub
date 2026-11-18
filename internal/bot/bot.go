@@ -767,7 +767,10 @@ func (b *Bot) handleConfirmCommand(m *mezon.ChannelMessage, text string) {
 	}
 
 	senderID := m.SenderID
-	senderName := m.ClanNick
+	senderName := sportMgr.ResolveDisplayName(senderID, m.Username)
+	if senderName == "" {
+		senderName = m.ClanNick
+	}
 	if senderName == "" {
 		senderName = m.DisplayName
 	}
@@ -810,7 +813,10 @@ func (b *Bot) handleCancelCommand(m *mezon.ChannelMessage) {
 	}
 
 	senderID := m.SenderID
-	senderName := m.ClanNick
+	senderName := sportMgr.ResolveDisplayName(senderID, m.Username)
+	if senderName == "" {
+		senderName = m.ClanNick
+	}
 	if senderName == "" {
 		senderName = m.DisplayName
 	}
@@ -1389,7 +1395,7 @@ func isBillFilter(s string) bool {
 	return false
 }
 
-func formatBillDashboard(bill *sport.BillSession, paid []*sport.BillItem, unpaid []*sport.BillItem, totalPaid, totalCost int64) string {
+func formatBillDashboard(sportMgr *sport.Manager, bill *sport.BillSession, paid []*sport.BillItem, unpaid []*sport.BillItem, totalPaid, totalCost int64) string {
 	var sb strings.Builder
 	code := bill.BillCode
 	if code == "" {
@@ -1414,9 +1420,9 @@ func formatBillDashboard(bill *sport.BillSession, paid []*sport.BillItem, unpaid
 	if len(paid) > 0 {
 		sb.WriteString(fmt.Sprintf("✅ **Đã thanh toán (%d người):**\n", len(paid)))
 		for _, item := range paid {
-			nameToDisplay := item.DisplayName
-			if nameToDisplay == "" {
-				nameToDisplay = item.Username
+			nameToDisplay := item.Username
+			if sportMgr != nil {
+				nameToDisplay = sportMgr.ResolveDisplayName(item.UserID, item.Username)
 			}
 			sb.WriteString(fmt.Sprintf("• @%s (%d slot - %s VNĐ)\n", nameToDisplay, item.Slots, fund.FormatVND(item.Amount)))
 		}
@@ -1426,9 +1432,9 @@ func formatBillDashboard(bill *sport.BillSession, paid []*sport.BillItem, unpaid
 	if len(unpaid) > 0 {
 		sb.WriteString(fmt.Sprintf("⏳ **Chưa thanh toán (%d người):**\n", len(unpaid)))
 		for _, item := range unpaid {
-			nameToDisplay := item.DisplayName
-			if nameToDisplay == "" {
-				nameToDisplay = item.Username
+			nameToDisplay := item.Username
+			if sportMgr != nil {
+				nameToDisplay = sportMgr.ResolveDisplayName(item.UserID, item.Username)
 			}
 			sb.WriteString(fmt.Sprintf("• @%s (%d slot - %s VNĐ)\n", nameToDisplay, item.Slots, fund.FormatVND(item.Amount)))
 		}
@@ -1459,6 +1465,11 @@ func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
 	}
 
 	if len(args) > 0 {
+		if !sportMgr.IsAdmin(m.SenderID) {
+			_ = b.reply(m, "⛔ Bạn không có quyền xác nhận thanh toán thay cho người khác. Mỗi người tự gõ `*paid` cho mình (chỉ quản trị viên @dai.trinhduc mới có thể tag tên người khác).")
+			return
+		}
+
 		paid, notFound, totalPaid, totalCost, paidCount, totalCount, err := sportMgr.MarkPaidBatch(args, filter)
 		if err != nil {
 			_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
@@ -1469,10 +1480,7 @@ func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
 		if len(paid) > 0 {
 			var names []string
 			for _, p := range paid {
-				disp := p.DisplayName
-				if disp == "" {
-					disp = p.Username
-				}
+				disp := sportMgr.ResolveDisplayName(p.UserID, p.Username)
 				names = append(names, "@"+disp)
 			}
 			sb.WriteString(fmt.Sprintf("✅ **Đã ghi nhận đóng tiền:** %s 💵\n\n", strings.Join(names, ", ")))
@@ -1504,10 +1512,7 @@ func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
 		}
 
 		if item != nil {
-			disp := item.DisplayName
-			if disp == "" {
-				disp = item.Username
-			}
+			disp := sportMgr.ResolveDisplayName(item.UserID, item.Username)
 			if alreadyPaid {
 				_ = b.reply(m, fmt.Sprintf("ℹ️ @%s đã được ghi nhận thanh toán trước đó rồi! 💵\n\n📊 **Tiến độ thu tiền:** %d/%d người (%s / %s VNĐ)",
 					disp, paidCount, totalCount, fund.FormatVND(totalPaid), fund.FormatVND(totalCost)))
@@ -1533,7 +1538,7 @@ func (b *Bot) handlePaidCommand(m *mezon.ChannelMessage, rawText string) {
 		return
 	}
 
-	_ = b.reply(m, formatBillDashboard(bill, paid, unpaid, totalPaid, totalCost))
+	_ = b.reply(m, formatBillDashboard(sportMgr, bill, paid, unpaid, totalPaid, totalCost))
 }
 
 func (b *Bot) handleUnpaidCommand(m *mezon.ChannelMessage, rawText string) {
@@ -1556,6 +1561,11 @@ func (b *Bot) handleUnpaidCommand(m *mezon.ChannelMessage, rawText string) {
 	}
 
 	if len(args) > 0 {
+		if !sportMgr.IsAdmin(m.SenderID) {
+			_ = b.reply(m, "⛔ Bạn không có quyền chuyển trạng thái thanh toán của người khác. Chỉ quản trị viên (@dai.trinhduc) mới có thể thực hiện.")
+			return
+		}
+
 		unmarked, notFound, err := sportMgr.MarkUnpaidBatch(args, filter)
 		if err != nil {
 			_ = b.reply(m, fmt.Sprintf("⚠️ %v", err))
@@ -1566,7 +1576,8 @@ func (b *Bot) handleUnpaidCommand(m *mezon.ChannelMessage, rawText string) {
 		if len(unmarked) > 0 {
 			var names []string
 			for _, u := range unmarked {
-				names = append(names, "@"+u.Username)
+				disp := sportMgr.ResolveDisplayName(u.UserID, u.Username)
+				names = append(names, "@"+disp)
 			}
 			sb.WriteString(fmt.Sprintf("↩️ Đã chuyển %s về trạng thái **CHƯA thanh toán**.\n", strings.Join(names, ", ")))
 		}
@@ -1687,6 +1698,11 @@ func (b *Bot) handleRegisterQRCommand(m *mezon.ChannelMessage, rawText string) {
 		return
 	}
 
+	if !sportMgr.IsAdmin(m.SenderID) {
+		_ = b.reply(m, "⛔ Bạn không có quyền cập nhật mã QR thanh toán. Chỉ quản trị viên (@dai.trinhduc) mới có quyền thực hiện.")
+		return
+	}
+
 	parts := strings.Fields(rawText)
 	if len(parts) < 3 {
 		_ = b.reply(m, "⚠️ Vui lòng cung cấp link QR: `*register qr <link_ảnh_qr>`")
@@ -1716,10 +1732,10 @@ func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 		"• `*summary`: Xem nhanh trạng thái chốt lịch, danh sách tham gia và sân bãi\n" +
 		"• `*split <công_thức> [tag]`: Chia tiền sân + cầu (ví dụ: `*split 360k + 26*9 @user1 @user2` hoặc tự động lấy từ điểm danh)\n" +
 		"• `*money <số_tiền> [tag]`: Chia tiền theo slot cố định (ví dụ: `*money 45k @user1 @user2`)\n" +
-		"• `*paid [mã/ngày] [@user...]`: Xem tiến độ thu tiền (ví dụ: `*paid 1`, `*paid CL1`, `*paid 17/11`) hoặc đánh dấu đã thanh toán\n" +
-		"• `*unpaid [mã/ngày] [@user...]`: Nhắc nhở người chưa đóng kèm mã QR hoặc hủy đánh dấu nhầm\n" +
+		"• `*paid [mã/ngày]`: Tự đánh dấu đã thanh toán (admin có thể tag thêm người khác để xác nhận hộ)\n" +
+		"• `*unpaid [mã/ngày]`: Nhắc nhở người chưa đóng kèm mã QR (admin có thể tag để hủy đánh dấu nhầm)\n" +
 		"• `*bxh [tháng]`: Bảng xếp hạng \"Chiến thần quật cầu\" & \"Chúa sủi\" (ví dụ: `*bxh` hoặc `*bxh 11/2026`)\n" +
-		"• `*register qr <link>`: Cập nhật mã QR thanh toán mới\n\n" +
+		"• `*register qr <link>`: Admin cập nhật mã QR thanh toán mới\n\n" +
 		"• `*help`: Hiển thị hướng dẫn này"
 	_ = b.reply(m, help)
 }

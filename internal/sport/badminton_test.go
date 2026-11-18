@@ -659,13 +659,56 @@ func TestLeaderboard(t *testing.T) {
 	if !strings.Contains(text, "Tổng số buổi đã tổ chức: **3 buổi**") {
 		t.Errorf("expected 3 matches, got %s", text)
 	}
-	// dai.trinhduc attended 3/3 -> Chiến thần quật cầu (shows Clan Nickname or username)
-	if (!strings.Contains(text, "👑 **@dai.trinhduc**: 3/3 buổi") && !strings.Contains(text, "👑 **@Trịnh Đức Đại**: 3/3 buổi")) || !strings.Contains(text, "Chiến thần quật cầu") {
+	// dai.trinhduc attended 3/3 -> Chiến thần quật cầu (must show canonical Clan Nickname)
+	if !strings.Contains(text, "👑 **@dai.trinhduc**: 3/3 buổi") || !strings.Contains(text, "Chiến thần quật cầu") {
 		t.Errorf("expected dai.trinhduc as Chien than quat cau, got %s", text)
+	}
+	if strings.Contains(text, "@Trịnh Đức Đại") {
+		t.Errorf("should never contain Vietnamese full name, got: %s", text)
 	}
 	// sui.master absent 3 times -> Chúa sủi của tháng
 	if !strings.Contains(text, "🍗 **@sui.master**: **3 lần**") || !strings.Contains(text, "Chúa sủi của tháng") {
 		t.Errorf("expected sui.master as Chua sui, got %s", text)
+	}
+
+	// Test historical records having Vietnamese real names: must be resolved to Clan Nicknames
+	mgr.state.MatchHistory = []MatchRecord{
+		{
+			SessionID: "m_realnames",
+			MatchDay:  "Thứ Hai",
+			MatchDate: "02/11/2026",
+			Attendees: []Participant{
+				{UserID: "1946167706600345600", Username: "Nguyễn Thành Đôn", Slots: 2},
+				{UserID: "1946197154334773248", Username: "Đới Phi Hậu", Slots: 1},
+			},
+			Absentees: []string{"Nguyễn Đình Toàn", "Phạm Minh Tuấn", "Đặng Cao Trí"},
+		},
+	}
+	text2, err := mgr.GetLeaderboardText("11/2026", now)
+	if err != nil {
+		t.Fatalf("GetLeaderboardText failed: %v", err)
+	}
+	// Verify that real names are converted to clan nicknames
+	if !strings.Contains(text2, "@don.nguyenthanh") {
+		t.Errorf("expected @don.nguyenthanh, got:\n%s", text2)
+	}
+	if !strings.Contains(text2, "@hau.duongphuc") {
+		t.Errorf("expected @hau.duongphuc, got:\n%s", text2)
+	}
+	if !strings.Contains(text2, "@toan.nguyendinh") {
+		t.Errorf("expected @toan.nguyendinh, got:\n%s", text2)
+	}
+	if !strings.Contains(text2, "@tuan.phamminh2") {
+		t.Errorf("expected @tuan.phamminh2, got:\n%s", text2)
+	}
+	if !strings.Contains(text2, "@tri.dangcao") {
+		t.Errorf("expected @tri.dangcao, got:\n%s", text2)
+	}
+	// Verify that none of the Vietnamese real names appear with @
+	for _, realName := range []string{"Nguyễn Thành Đôn", "Đới Phi Hậu", "Nguyễn Đình Toàn", "Phạm Minh Tuấn", "Đặng Cao Trí"} {
+		if strings.Contains(text2, "@"+realName) {
+			t.Errorf("found unconverted real name @%s in leaderboard:\n%s", realName, text2)
+		}
 	}
 }
 
