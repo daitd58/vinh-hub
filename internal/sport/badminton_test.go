@@ -1101,6 +1101,62 @@ func TestParseMatchSchedule(t *testing.T) {
 	if err != nil || d5 != "Thứ Năm" || dt5 != "19/11/2026" || tm5 != "20:00" || !spec5 {
 		t.Errorf("Case 5 failed: day=%s date=%s time=%s spec=%v err=%v", d5, dt5, tm5, spec5, err)
 	}
+
+	// Case 6: Real-world admin confirm string with parenthesized address, comma, and time range
+	d6, dt6, tm6, c6, spec6, err := ParseMatchSchedule("Sân KT1 (đối diện Bệnh viện Mắt Sài Gòn), khung giờ 19:00 - 21:30 (tối nay)", now, loc)
+	if err != nil || d6 != "Thứ Tư" || dt6 != "18/11/2026" || tm6 != "19:00 - 21:30" || c6 != "Sân KT1 (đối diện Bệnh viện Mắt Sài Gòn)" || !spec6 {
+		t.Errorf("Case 6 failed: day=%s date=%s time=%s court=%s spec=%v err=%v", d6, dt6, tm6, c6, spec6, err)
+	}
+
+	// Case 7: Another court with address
+	d7, dt7, tm7, c7, spec7, err := ParseMatchSchedule("Sân Minh Hải  (đối diện Bệnh viện Mắt Sài Gòn), khung giờ 19:00 - 21:30 (tối nay)", now, loc)
+	if err != nil || d7 != "Thứ Tư" || dt7 != "18/11/2026" || tm7 != "19:00 - 21:30" || c7 != "Sân Minh Hải  (đối diện Bệnh viện Mắt Sài Gòn)" || !spec7 {
+		t.Errorf("Case 7 failed: day=%s date=%s time=%s court=%s spec=%v err=%v", d7, dt7, tm7, c7, spec7, err)
+	}
+}
+
+func TestSummary_WhenConfirmedSkipsLLMAndPreservesSchedule(t *testing.T) {
+	sender := &mockSender{}
+	loc := time.FixedZone("ICT", 7*3600)
+	mgr := NewManager(Config{
+		Enabled:       true,
+		ChannelID:     "sport-chan",
+		RoleName:      "Vinh-CL",
+		AdminUserIDs:  []string{"1783440675396653056"},
+		Timezone:      loc,
+		OpenAIKey:     "fake-token",
+		OpenAIBaseURL: "http://127.0.0.1:54321/must-never-be-called", // Any call here would fail or hang
+		StatePath:     filepath.Join(t.TempDir(), "state.json"),
+	}, sender)
+
+	// User reactions
+	mgr.RecordReaction("sport-chan", "m0", "1783440675396653056", "dai.trinhduc", ":cong1:", false, 1)
+
+	// Chat contains joke messages and non-admin command attempts
+	mgr.RecordMessage("sport-chan", "m1", "user2", "anh.leduc1", "sao nay danh san khac di, san Cuu Long luc 17h")
+	mgr.RecordMessage("sport-chan", "m2", "user3", "other.user", "*confirm Sân Lạ Quắc, 18:00")
+
+	// Admin confirms match
+	_, err := mgr.ConfirmMatch(context.Background(), "1783440675396653056", "dai.trinhduc", "Sân KT1 (đối diện Bệnh viện Mắt Sài Gòn), khung giờ 19:00 - 21:30 (tối nay)")
+	if err != nil {
+		t.Fatalf("ConfirmMatch failed: %v", err)
+	}
+
+	// Now call GetSummary: MUST NOT call LLM and MUST preserve confirmed court & time
+	summary := mgr.GetSummary(context.Background())
+
+	if !strings.Contains(summary, "ĐÃ CHỐT LỊCH CHÍNH THỨC") || !strings.Contains(summary, "@dai.trinhduc") {
+		t.Errorf("expected confirmed badge in summary, got:\n%s", summary)
+	}
+	if !strings.Contains(summary, "Sân KT1 (đối diện Bệnh viện Mắt Sài Gòn)") {
+		t.Errorf("expected confirmed court in summary, got:\n%s", summary)
+	}
+	if !strings.Contains(summary, "19:00 - 21:30") {
+		t.Errorf("expected confirmed time in summary, got:\n%s", summary)
+	}
+	if strings.Contains(summary, "Sân Lạ Quắc") || strings.Contains(summary, "san Cuu Long") {
+		t.Errorf("summary should NEVER contain unconfirmed chat courts, got:\n%s", summary)
+	}
 }
 
 func TestConfirmAndCancelMatch_Permissions(t *testing.T) {

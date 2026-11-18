@@ -319,6 +319,22 @@ func (m *Manager) loadState() {
 			}
 
 			// Retroactive sanitization of historical and cached state
+			var cleanMsgs []MessageRecord
+			for _, msg := range s.Messages {
+				c := strings.TrimSpace(msg.Content)
+				if !strings.HasPrefix(c, "*") && !strings.HasPrefix(c, "!") && !strings.HasPrefix(c, "/") {
+					cleanMsgs = append(cleanMsgs, msg)
+				}
+			}
+			s.Messages = cleanMsgs
+
+			if s.Confirmed && s.CourtBooked == "" && s.MatchDate == "18/11/2026" {
+				s.CourtBooked = "Sân KT1 (đối diện Bệnh viện Mắt Sài Gòn)"
+				if s.MatchTime == "" || s.MatchTime == "19:00" {
+					s.MatchTime = "19:00 - 21:30"
+				}
+			}
+
 			if m.registry != nil {
 				for i := range s.MatchHistory {
 					for j := range s.MatchHistory[i].Attendees {
@@ -477,6 +493,12 @@ func (m *Manager) RecordMessage(channelID, msgID, userID, username, content stri
 	if clanNick != "" {
 		m.RegisterUser(userID, username, clanNick, "")
 	}
+
+	// Do not record bot command invocations (*confirm, *summary, *bxh, etc.) into chat history.
+	if strings.HasPrefix(content, "*") || strings.HasPrefix(content, "!") || strings.HasPrefix(content, "/") {
+		return
+	}
+
 	displayName := m.ResolveDisplayName(userID, username)
 	if displayName == "" {
 		displayName = username
@@ -561,15 +583,22 @@ func (m *Manager) tick(ctx context.Context, now time.Time) {
 	todayStr := now.Format("02/01/2006")
 	if confirmed && matchDateStr != "" && todayStr == matchDateStr {
 		isSat := (weekday == time.Saturday)
-		matchHour, matchMin, foundTime, matchTimeStr := ExtractMatchTime(msgs, isSat)
+		var matchHour, matchMin int
+		var foundTime bool
+		var matchTimeStr string
 
-		if !foundTime && mTime != "" {
+		// If match was confirmed with a specific time, use that confirmed time as source of truth
+		if mTime != "" {
 			if h, mn, ok := parseHourMin(mTime); ok {
 				matchHour = h
 				matchMin = mn
 				foundTime = true
-				matchTimeStr = fmt.Sprintf("%02d:%02d", h, mn)
+				matchTimeStr = mTime
 			}
+		}
+
+		if !foundTime {
+			matchHour, matchMin, foundTime, matchTimeStr = ExtractMatchTime(msgs, isSat)
 		}
 
 		remindHour := matchHour - 1
@@ -740,14 +769,22 @@ func ParseMatchSchedule(input string, now time.Time, loc *time.Location) (matchD
 
 	low := strings.ToLower(input)
 
-	// 1. Parse Court info if specified (e.g. "san 3", "sân số 2", "sân ĐH Vinh")
-	reCourt := regexp.MustCompile(`(?i)(?:sân|san)\s+([^,]+?)(?:\s+(?:lúc|luc|\d{1,2}h|\d{1,2}:)|$)`)
+	// 1. Parse Court info if specified (e.g. "Sân KT1 (đối diện Bệnh viện Mắt Sài Gòn)", "san 3", "sân số 2", "sân ĐH Vinh")
+	reCourt := regexp.MustCompile(`(?i)\b(?:sân|san)\b\s*([^,;]+(?:\([^)]*\)[^,;]*)?)`)
+	reCourtTimeStrip := regexp.MustCompile(`(?i)\s+(?:lúc|luc|khung\s*giờ|khung\s*gio)?\s*\b\d{1,2}(?:[:h]\d{0,2})?.*$`)
+	reCourtDateStrip := regexp.MustCompile(`(?i)\s+\b(?:hôm nay|hom nay|tối nay|toi nay|ngày mai|ngay mai|mai|t[2-7]|cn)\b.*$`)
+
 	if m := reCourt.FindStringSubmatch(input); len(m) >= 2 {
 		courtVal := strings.TrimSpace(m[1])
-		if !strings.HasPrefix(strings.ToLower(courtVal), "sân") && !strings.HasPrefix(strings.ToLower(courtVal), "san") {
-			court = "Sân " + courtVal
-		} else {
-			court = courtVal
+		courtVal = reCourtTimeStrip.ReplaceAllString(courtVal, "")
+		courtVal = reCourtDateStrip.ReplaceAllString(courtVal, "")
+		courtVal = strings.TrimSpace(courtVal)
+		if courtVal != "" {
+			if !strings.HasPrefix(strings.ToLower(courtVal), "sân") && !strings.HasPrefix(strings.ToLower(courtVal), "san") {
+				court = "Sân " + courtVal
+			} else {
+				court = courtVal
+			}
 		}
 	}
 
@@ -835,7 +872,10 @@ func ParseMatchSchedule(input string, now time.Time, loc *time.Location) (matchD
 
 	// 3. Parse Time
 	isSat := matchDay == "Thứ Bảy"
-	if h, mn, ok := parseHourMin(low); ok {
+	reTimeRange := regexp.MustCompile(`(?i)\b(1[2-9]|2[0-2]|[1-9])(?:[:h]([0-5][0-9]))?\s*(?:-|đến|den)\s*(1[2-9]|2[0-2]|[1-9])(?:[:h]([0-5][0-9]))?\b`)
+	if m := reTimeRange.FindString(low); m != "" {
+		matchTime = strings.TrimSpace(m)
+	} else if h, mn, ok := parseHourMin(low); ok {
 		matchTime = fmt.Sprintf("%02d:%02d", h, mn)
 	} else if dateSpecified {
 		if isSat {
@@ -1149,13 +1189,23 @@ func (m *Manager) CancelMatch(ctx context.Context, userID, username string) (str
 	return msg, err
 }
 
-// TriggerReminder compiles an AI summary of attendance messages and sends a 1-hour pre-match reminder.
+// TriggerReminder compiles summary of attendance messages and sends a 1-hour pre-match reminder.
 func (m *Manager) TriggerReminder(ctx context.Context, now time.Time) error {
 	m.mu.Lock()
+	confirmed := m.state.Confirmed
+	mTime := m.state.MatchTime
 	messages := append([]MessageRecord(nil), m.state.Messages...)
 	isSat := now.Weekday() == time.Saturday
-	_, _, foundTime, detectedTime := ExtractMatchTime(messages, isSat)
 	m.mu.Unlock()
+
+	var detectedTime string
+	var foundTime bool
+	if confirmed && mTime != "" {
+		detectedTime = mTime
+		foundTime = true
+	} else {
+		_, _, foundTime, detectedTime = ExtractMatchTime(messages, isSat)
+	}
 
 	return m.TriggerReminderWithTime(ctx, now, detectedTime, foundTime)
 }
@@ -1166,6 +1216,7 @@ func (m *Manager) TriggerReminderWithTime(ctx context.Context, now time.Time, ma
 	messages := append([]MessageRecord(nil), m.state.Messages...)
 	matchDay := m.state.MatchDay
 	matchDate := m.state.MatchDate
+	courtBooked := m.state.CourtBooked
 	m.mu.Unlock()
 
 	if matchDay == "" {
@@ -1202,7 +1253,10 @@ func (m *Manager) TriggerReminderWithTime(ctx context.Context, now time.Time, ma
 		sb.WriteString(fmt.Sprintf("• ❌ **Vắng mặt (%d người):** %s\n", len(summary.NotGoing), strings.Join(summary.NotGoing, ", ")))
 	}
 
-	court := strings.TrimSpace(summary.CourtInfo)
+	court := strings.TrimSpace(courtBooked)
+	if court == "" {
+		court = strings.TrimSpace(summary.CourtInfo)
+	}
 	if court != "" && !strings.EqualFold(court, "Chưa có thông tin sân") {
 		sb.WriteString(fmt.Sprintf("• 🏟️ **Sân bãi:** %s\n", court))
 	} else {
@@ -1276,10 +1330,28 @@ func (m *Manager) SummarizeMessages(ctx context.Context, messages []MessageRecor
 		}
 		notGoing = append(notGoing, disp)
 	}
+
+	isConfirmed := m.state.Confirmed
+	confirmedCourt := strings.TrimSpace(m.state.CourtBooked)
 	m.mu.Unlock()
 
 	sort.Strings(going)
 	sort.Strings(notGoing)
+
+	// If match has already been confirmed by admin, attendance is strictly from reactions
+	// and court is already locked in. DO NOT call LLM to save tokens and avoid overrides.
+	if isConfirmed {
+		court := confirmedCourt
+		if court == "" {
+			court = "Sẽ cập nhật trước giờ đánh"
+		}
+		return SummaryResult{
+			Going:      going,
+			TotalSlots: totalSlots,
+			NotGoing:   notGoing,
+			CourtInfo:  court,
+		}
+	}
 
 	// 2. Court info extracted from messages (AI preferred, fallback to NLP)
 	courtInfo := ""
@@ -1734,7 +1806,11 @@ func (m *Manager) GetSummary(ctx context.Context) string {
 	if court != "" && !strings.EqualFold(court, "Chưa có thông tin sân") {
 		sb.WriteString(fmt.Sprintf("• 🏟️ **Sân:** %s\n", court))
 	} else {
-		sb.WriteString("• 🏟️ **Sân:** Chưa có thông tin sân\n")
+		if confirmed {
+			sb.WriteString("• 🏟️ **Sân:** Sẽ cập nhật trước giờ đánh\n")
+		} else {
+			sb.WriteString("• 🏟️ **Sân:** Chưa có thông tin sân\n")
+		}
 	}
 
 	return sb.String()
