@@ -101,5 +101,11 @@ func decodeJWT(token string) (exp int64, vars map[string]any, err error) {
 		return 0, nil, err
 	}
 	e, _ := claims.Exp.Int64()
+	if e > 10000000000 { // milliseconds to seconds
+		e = e / 1000
+	}
+	if e == 0 {
+		e = time.Now().Add(50 * time.Minute).Unix()
+	}
 	return e, claims.Vrs, nil
 }

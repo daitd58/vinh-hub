@@ -170,9 +170,17 @@ func (i *Indexer) MonthlyTransactions(ctx context.Context, wallet string, year i
 
 func cleanTransferContent(s string) string {
 	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "–", "-")
+	s = strings.ReplaceAll(s, "—", "-")
 	lower := strings.ToLower(s)
 	if strings.HasPrefix(lower, "transfer funds - ") {
 		return strings.TrimSpace(s[len("transfer funds - "):])
+	}
+	if strings.HasPrefix(lower, "transfer funds:") {
+		return strings.TrimSpace(s[len("transfer funds:"):])
+	}
+	if strings.HasPrefix(lower, "transfer funds :") {
+		return strings.TrimSpace(s[len("transfer funds :"):])
 	}
 	if lower == "transfer funds" {
 		return ""
@@ -184,6 +192,8 @@ func cleanTransferContent(s string) string {
 func ResolveTxUser(tx TxRecord, fundWallet string, wMap *UserWalletMap) (user string, content string, isIncoming bool) {
 	isIncoming = strings.EqualFold(tx.ToAddress, fundWallet)
 	text := strings.TrimSpace(tx.TextData)
+	text = strings.ReplaceAll(text, "–", "-")
+	text = strings.ReplaceAll(text, "—", "-")
 
 	if isIncoming {
 		if strings.Contains(text, " transfer via bot: ") {
@@ -193,7 +203,7 @@ func ResolveTxUser(tx TxRecord, fundWallet string, wMap *UserWalletMap) (user st
 		} else if strings.Contains(text, " - ") {
 			parts := strings.SplitN(text, " - ", 2)
 			candidate := strings.TrimSpace(parts[0])
-			if !strings.EqualFold(candidate, "transfer funds") {
+			if !strings.EqualFold(candidate, "transfer funds") && !strings.HasPrefix(strings.ToLower(candidate), "transfer funds") {
 				if wMap != nil {
 					if _, ok := wMap.LookupWallet(candidate); ok {
 						user = candidate
@@ -210,6 +220,10 @@ func ResolveTxUser(tx TxRecord, fundWallet string, wMap *UserWalletMap) (user st
 			} else {
 				content = cleanTransferContent(parts[1])
 			}
+		}
+
+		if strings.EqualFold(strings.TrimSpace(user), "transfer funds") {
+			user = ""
 		}
 
 		if user == "" && wMap != nil {

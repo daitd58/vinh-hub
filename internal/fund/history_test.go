@@ -238,6 +238,17 @@ func TestResolveTxUser(t *testing.T) {
 	if !in7 || u7 != "chinh.nguyenduc" || c7 != "1 nutriboost" {
 		t.Errorf("Case 7 failed: u=%s, c=%s, in=%v", u7, c7, in7)
 	}
+
+	// Case 8: Transfer funds with colon or en-dash and unknown sender address
+	tx8 := TxRecord{
+		FromAddress: "9UnknownWalletAddress1234567890abcdef",
+		ToAddress:   fundWallet,
+		TextData:    "Transfer funds: 40.000",
+	}
+	u8, c8, in8 := ResolveTxUser(tx8, fundWallet, wMap)
+	if !in8 || u8 == "Transfer funds" || !strings.Contains(u8, "...") || c8 != "40.000" {
+		t.Errorf("Case 8 failed: u=%s, c=%s, in=%v", u8, c8, in8)
+	}
 }
 
 func TestFormatRecentHistory(t *testing.T) {

@@ -2057,14 +2057,14 @@ func (m *Manager) LookupParticipant(query string) (userID, username string, ok b
 	// 1. Current going participants
 	for uid, p := range m.state.GoingParticipants {
 		if strings.ToLower(strings.TrimPrefix(p.Username, "@")) == clean || uid == clean {
-			return p.UserID, p.Username, true
+			return p.UserID, m.ResolveDisplayName(p.UserID, p.Username), true
 		}
 	}
 
 	// 2. Previous match participants
 	for _, p := range m.state.PreviousMatchParticipants {
 		if strings.ToLower(strings.TrimPrefix(p.Username, "@")) == clean || p.UserID == clean {
-			return p.UserID, p.Username, true
+			return p.UserID, m.ResolveDisplayName(p.UserID, p.Username), true
 		}
 	}
 
@@ -2072,7 +2072,7 @@ func (m *Manager) LookupParticipant(query string) (userID, username string, ok b
 	for _, mh := range m.state.MatchHistory {
 		for _, p := range mh.Attendees {
 			if strings.ToLower(strings.TrimPrefix(p.Username, "@")) == clean || p.UserID == clean {
-				return p.UserID, p.Username, true
+				return p.UserID, m.ResolveDisplayName(p.UserID, p.Username), true
 			}
 		}
 	}
@@ -2080,11 +2080,18 @@ func (m *Manager) LookupParticipant(query string) (userID, username string, ok b
 	// 4. Message records
 	for _, msg := range m.state.Messages {
 		if strings.ToLower(strings.TrimPrefix(msg.Username, "@")) == clean || msg.UserID == clean {
-			return msg.UserID, msg.Username, true
+			return msg.UserID, m.ResolveDisplayName(msg.UserID, msg.Username), true
 		}
 	}
 
-	return clean, clean, false
+	// 5. User registry (known clan profiles & aliases)
+	if m.registry != nil {
+		if uid, uName, ok := m.registry.LookupUser(clean); ok {
+			return uid, m.ResolveDisplayName(uid, uName), true
+		}
+	}
+
+	return clean, m.ResolveDisplayName("", clean), false
 }
 
 // CreateSplitBill parses the split formula, calculates slot price, and creates a BillSession.

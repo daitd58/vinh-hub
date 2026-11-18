@@ -1078,6 +1078,10 @@ func parseCommandTagsAndExpr(rawText, cmdPrefix string, mentions []mezon.Mention
 			}
 		}
 
+		if sportMgr != nil {
+			resolvedUname = sportMgr.ResolveDisplayName(resolvedUID, resolvedUname)
+		}
+
 		p := &sport.Participant{
 			UserID:   resolvedUID,
 			Username: resolvedUname,

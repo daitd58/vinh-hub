@@ -511,6 +511,39 @@ func (r *UserRegistry) AddAlias(alias, canonicalUsername string) {
 	r.aliases[strings.ToLower(strings.TrimSpace(alias))] = strings.TrimSpace(canonicalUsername)
 }
 
+// LookupUser searches by userID, username, clan nickname, or alias.
+func (r *UserRegistry) LookupUser(query string) (userID, clanNick string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	clean := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(query, "@")))
+	if clean == "" {
+		return "", "", false
+	}
+
+	// 1. By UserID
+	if p, ok := r.byID[clean]; ok {
+		return p.UserID, p.BestDisplayName(), true
+	}
+
+	// 2. Alias mapping
+	if target, ok := r.aliases[clean]; ok {
+		clean = strings.ToLower(target)
+	}
+
+	// 3. By Username
+	if p, ok := r.byUsername[clean]; ok {
+		return p.UserID, p.BestDisplayName(), true
+	}
+
+	// 4. By DisplayName / ClanNick
+	if p, ok := r.byDisplayName[clean]; ok {
+		return p.UserID, p.BestDisplayName(), true
+	}
+
+	return "", "", false
+}
+
 func (r *UserRegistry) loadFromFile() error {
 	data, err := os.ReadFile(r.filePath)
 	if err != nil {

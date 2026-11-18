@@ -366,6 +366,7 @@ func (c *MezonClient) retryConnect() {
 				break
 			} else {
 				log.Printf("mezon: reconnect init failed: %v", err)
+				c.socket.Close()
 			}
 		} else {
 			log.Printf("mezon: reconnect dial failed, retrying in %s: %v", delay*2, err)
@@ -406,6 +407,29 @@ func (c *MezonClient) refreshSession() error {
 
 	c.mu.Lock()
 	c.session = session
+	if sessApi.ApiUrl != "" {
+		host, port, useSSL, perr := ParseURLToHostAndSSL(sessApi.ApiUrl)
+		if perr == nil {
+			c.Host, c.Port, c.UseSSL = host, port, useSSL
+			scheme := "http://"
+			if useSSL {
+				scheme = "https://"
+			}
+			if c.apiClient != nil {
+				c.apiClient.BasePath = scheme + host + ":" + port
+			}
+		}
+	}
+	if c.apiClient != nil {
+		c.apiClient.APIKey = session.Token
+	}
+	if c.socket != nil {
+		c.socket.host = c.Host
+		c.socket.port = c.Port
+		c.socket.useSSL = c.UseSSL
+		c.socket.wsURL = session.WsURL
+		c.socket.TcpURL = session.TcpURL
+	}
 	c.mu.Unlock()
 
 	// Update cached clans with the fresh session token
@@ -439,12 +463,15 @@ func (c *MezonClient) tokenRefreshLoop() {
 				return
 			}
 
-			// Proactively refresh when less than 10 minutes remain before expiry
-			if sess != nil && sess.ExpiresAt > 0 {
+			// Proactively refresh when less than 10 minutes remain before expiry,
+			// or if more than 45 minutes have elapsed since session creation.
+			if sess != nil {
 				now := time.Now().Unix()
 				timeRemaining := time.Duration(sess.ExpiresAt-now) * time.Second
-				if timeRemaining < 10*time.Minute {
-					log.Printf("mezon: session token expires in %s, proactively refreshing...", timeRemaining.Round(time.Second))
+				timeElapsed := time.Duration(now-sess.CreatedAt) * time.Second
+				if (sess.ExpiresAt > 0 && timeRemaining < 10*time.Minute) || timeElapsed >= 45*time.Minute {
+					log.Printf("mezon: session token expiring (remaining: %s, elapsed: %s), proactively refreshing...",
+						timeRemaining.Round(time.Second), timeElapsed.Round(time.Second))
 					if err := c.refreshSession(); err != nil {
 						log.Printf("mezon: proactive token refresh failed: %v", err)
 					} else {
