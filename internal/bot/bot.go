@@ -610,8 +610,17 @@ func (b *Bot) handleMessage(m *mezon.ChannelMessage) {
 	case cmd == "*delete vinhhub" || cmd == "!delete vinhhub" || cmd == "/delete vinhhub" ||
 		cmd == "*vinhhub delete" || cmd == "!vinhhub delete" || cmd == "/vinhhub delete":
 		b.handleDeleteVinhHubCommand(m)
-	case cmd == "*diemdanh" || cmd == "*vinhhub diemdanh" || strings.HasPrefix(cmd, "*diemdanh"):
-		b.handleDiemDanhCommand(m)
+	case cmd == "*diemdanh" || cmd == "*vinhhub diemdanh" || strings.HasPrefix(cmd, "*diemdanh ") || strings.HasPrefix(cmd, "!diemdanh") || strings.HasPrefix(cmd, "/diemdanh"):
+		b.handleDiemDanhCommand(m, text)
+	case cmd == "*confirm" || strings.HasPrefix(cmd, "*confirm ") || cmd == "!confirm" || strings.HasPrefix(cmd, "!confirm ") || cmd == "/confirm" || strings.HasPrefix(cmd, "/confirm ") ||
+		cmd == "*chotlich" || strings.HasPrefix(cmd, "*chotlich ") || cmd == "!chotlich" || strings.HasPrefix(cmd, "!chotlich ") || cmd == "/chotlich" || strings.HasPrefix(cmd, "/chotlich ") ||
+		cmd == "*chot" || strings.HasPrefix(cmd, "*chot ") || cmd == "!chot" || strings.HasPrefix(cmd, "!chot ") || cmd == "/chot" || strings.HasPrefix(cmd, "/chot ") ||
+		cmd == "*doilich" || strings.HasPrefix(cmd, "*doilich ") || cmd == "!doilich" || strings.HasPrefix(cmd, "!doilich ") || cmd == "/doilich" || strings.HasPrefix(cmd, "/doilich "):
+		b.handleConfirmCommand(m, text)
+	case cmd == "*huylich" || cmd == "!huylich" || cmd == "/huylich" ||
+		cmd == "*cancel" || cmd == "!cancel" || cmd == "/cancel" ||
+		cmd == "*huy" || cmd == "!huy" || cmd == "/huy":
+		b.handleCancelCommand(m)
 	case cmd == "*nhaclich" || cmd == "*vinhhub nhaclich":
 		b.handleNhacLichCommand(m)
 	case cmd == "*summary" || cmd == "*vinhhub summary":
@@ -722,7 +731,7 @@ func (b *Bot) handleDeleteVinhHubCommand(m *mezon.ChannelMessage) {
 	_ = b.reply(m, "✅ Đã xoá ảnh tuỳ chỉnh và khôi phục ảnh menu VinhHub mặc định!")
 }
 
-func (b *Bot) handleDiemDanhCommand(m *mezon.ChannelMessage) {
+func (b *Bot) handleDiemDanhCommand(m *mezon.ChannelMessage, text string) {
 	b.mu.RLock()
 	sportMgr := b.sportMgr
 	b.mu.RUnlock()
@@ -731,9 +740,91 @@ func (b *Bot) handleDiemDanhCommand(m *mezon.ChannelMessage) {
 		_ = b.reply(m, "Tính năng điểm danh chưa được cấu hình.")
 		return
 	}
-	if err := sportMgr.TriggerDiemDanh(context.Background(), time.Now()); err != nil {
+
+	args := strings.TrimSpace(text)
+	for _, pfx := range []string{"*vinhhub diemdanh", "!vinhhub diemdanh", "/vinhhub diemdanh", "*diemdanh", "!diemdanh", "/diemdanh"} {
+		if strings.HasPrefix(strings.ToLower(args), pfx) {
+			args = strings.TrimSpace(args[len(pfx):])
+			break
+		}
+	}
+
+	if err := sportMgr.TriggerDiemDanhWithArgs(context.Background(), time.Now(), args); err != nil {
 		b.logger().Error("trigger diemdanh failed", "err", err)
 		_ = b.reply(m, fmt.Sprintf("Lỗi gửi điểm danh: %v", err))
+		return
+	}
+}
+
+func (b *Bot) handleConfirmCommand(m *mezon.ChannelMessage, text string) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+
+	senderID := m.SenderID
+	senderName := m.ClanNick
+	if senderName == "" {
+		senderName = m.DisplayName
+	}
+	if senderName == "" {
+		senderName = m.Username
+	}
+
+	if !sportMgr.IsAdmin(senderID) {
+		_ = b.reply(m, "⛔ Bạn không có quyền chốt lịch thi đấu. Chỉ quản trị viên (@dai.trinhduc) mới có thể chốt lịch.")
+		return
+	}
+
+	args := strings.TrimSpace(text)
+	for _, pfx := range []string{
+		"*confirm", "!confirm", "/confirm",
+		"*chotlich", "!chotlich", "/chotlich",
+		"*chot", "!chot", "/chot",
+		"*doilich", "!doilich", "/doilich",
+	} {
+		if strings.HasPrefix(strings.ToLower(args), pfx) {
+			args = strings.TrimSpace(args[len(pfx):])
+			break
+		}
+	}
+
+	if _, err := sportMgr.ConfirmMatch(context.Background(), senderID, senderName, args); err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ Lỗi chốt lịch: %v", err))
+		return
+	}
+}
+
+func (b *Bot) handleCancelCommand(m *mezon.ChannelMessage) {
+	b.mu.RLock()
+	sportMgr := b.sportMgr
+	b.mu.RUnlock()
+
+	if sportMgr == nil {
+		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+
+	senderID := m.SenderID
+	senderName := m.ClanNick
+	if senderName == "" {
+		senderName = m.DisplayName
+	}
+	if senderName == "" {
+		senderName = m.Username
+	}
+
+	if !sportMgr.IsAdmin(senderID) {
+		_ = b.reply(m, "⛔ Bạn không có quyền hủy lịch thi đấu. Chỉ quản trị viên (@dai.trinhduc) mới có thể hủy.")
+		return
+	}
+
+	if _, err := sportMgr.CancelMatch(context.Background(), senderID, senderName); err != nil {
+		_ = b.reply(m, fmt.Sprintf("⚠️ Lỗi hủy lịch: %v", err))
 		return
 	}
 }
@@ -745,6 +836,10 @@ func (b *Bot) handleNhacLichCommand(m *mezon.ChannelMessage) {
 
 	if sportMgr == nil {
 		_ = b.reply(m, "Tính năng thể thao chưa được cấu hình.")
+		return
+	}
+	if !sportMgr.IsConfirmed() && !sportMgr.IsAdmin(m.SenderID) {
+		_ = b.reply(m, "⚠️ Lịch đánh cầu chưa được Quản trị viên (@dai.trinhduc) chốt chính thức (`*confirm`).")
 		return
 	}
 	if err := sportMgr.TriggerReminder(context.Background(), time.Now()); err != nil {
@@ -1614,9 +1709,11 @@ func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 		"• `*register vinhhub <link>`: Cập nhật ảnh menu mới\n" +
 		"• `*delete vinhhub`: Khôi phục ảnh menu mặc định\n\n" +
 		"🏸 **Cầu lông & Thể thao:**\n" +
-		"• `*diemdanh`: Gửi thông báo điểm danh cho buổi đánh cầu tiếp theo\n" +
-		"• `*nhaclich`: Nhắc lịch trước giờ đánh & AI tóm tắt ai đi ai nghỉ, sân nào\n" +
-		"• `*summary`: Xem nhanh danh sách điểm danh và sân bãi hiện tại\n" +
+		"• `*diemdanh [ngày/thứ] [giờ]`: Mở điểm danh linh hoạt (ví dụ: `*diemdanh`, `*diemdanh toi nay 19:30`, `*diemdanh t4 19:00`)\n" +
+		"• `*confirm [giờ/sân]` (hoặc `*chotlich`): Admin chốt lịch chính thức để bot nhắc lịch (ví dụ: `*confirm 19:30 san 3`)\n" +
+		"• `*huylich` (hoặc `*cancel`): Admin hủy lịch nếu không đánh hoặc đổi ý\n" +
+		"• `*nhaclich`: Nhắc lịch trước giờ đánh & tóm tắt ai đi ai nghỉ, sân nào\n" +
+		"• `*summary`: Xem nhanh trạng thái chốt lịch, danh sách tham gia và sân bãi\n" +
 		"• `*split <công_thức> [tag]`: Chia tiền sân + cầu (ví dụ: `*split 360k + 26*9 @user1 @user2` hoặc tự động lấy từ điểm danh)\n" +
 		"• `*money <số_tiền> [tag]`: Chia tiền theo slot cố định (ví dụ: `*money 45k @user1 @user2`)\n" +
 		"• `*paid [mã/ngày] [@user...]`: Xem tiến độ thu tiền (ví dụ: `*paid 1`, `*paid CL1`, `*paid 17/11`) hoặc đánh dấu đã thanh toán\n" +

@@ -232,3 +232,52 @@ func TestHandlePaidCommand_SelfConfirm(t *testing.T) {
 		t.Errorf("stranger should not mark anyone paid, got %d", len(paid3))
 	}
 }
+
+func TestHandleConfirmAndCancelCommand_Permissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	sportMgr := sport.NewManager(sport.Config{
+		ChannelID:    "sport-chan",
+		AdminUserIDs: []string{"1783440675396653056"},
+		StatePath:    filepath.Join(tmpDir, "badminton.json"),
+	}, nil)
+
+	b := &Bot{
+		cfg:      Config{SportChannelID: "sport-chan"},
+		sportMgr: sportMgr,
+	}
+
+	// 1. Stranger tries to confirm:
+	mStranger := &mezon.ChannelMessage{
+		ChannelID: "sport-chan",
+		SenderID:  "stranger_id",
+		Username:  "stranger",
+	}
+	b.handleConfirmCommand(mStranger, "*confirm 19:30")
+	if sportMgr.IsConfirmed() {
+		t.Errorf("stranger should not be able to confirm match")
+	}
+
+	// 2. Admin confirms:
+	mAdmin := &mezon.ChannelMessage{
+		ChannelID: "sport-chan",
+		SenderID:  "1783440675396653056",
+		Username:  "dai.trinhduc",
+		ClanNick:  "dai.trinhduc",
+	}
+	b.handleConfirmCommand(mAdmin, "*confirm t4 19:30 san 3")
+	if !sportMgr.IsConfirmed() {
+		t.Errorf("admin should be able to confirm match")
+	}
+
+	// 3. Stranger tries to cancel:
+	b.handleCancelCommand(mStranger)
+	if !sportMgr.IsConfirmed() {
+		t.Errorf("stranger should not be able to cancel match")
+	}
+
+	// 4. Admin cancels:
+	b.handleCancelCommand(mAdmin)
+	if sportMgr.IsConfirmed() {
+		t.Errorf("admin cancel should set confirmed to false")
+	}
+}

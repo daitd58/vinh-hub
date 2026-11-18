@@ -220,6 +220,7 @@ func main() {
 			OpenAIModel:   cfg.Sport.OpenAIModel,
 			GeminiKey:     cfg.Sport.GeminiKey,
 			PaymentQR:     cfg.Sport.PaymentQR,
+			AdminUserIDs:  cfg.Sport.AdminUserIDs,
 			Timezone:      cfg.Fund.Timezone,
 			Log:           logger,
 		}, mezonBot)

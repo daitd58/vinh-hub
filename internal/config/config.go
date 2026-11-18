@@ -45,6 +45,7 @@ type SportConfig struct {
 	Tru1EmojiID   string
 	CheckEmojiID  string
 	PaymentQR     string
+	AdminUserIDs  []string
 }
 
 // BotWalletConfig holds settings for the intermediary bot wallet.
@@ -147,6 +148,16 @@ func Load() *Config {
 	cfg.Sport.Tru1EmojiID = strings.TrimSpace(env("SPORT_TRU1_EMOJI_ID", "7294564276005201529"))
 	cfg.Sport.CheckEmojiID = strings.TrimSpace(env("SPORT_CHECK_EMOJI_ID", "7237751213104827794"))
 	cfg.Sport.PaymentQR = strings.TrimSpace(env("SPORT_PAYMENT_QR", "https://cdn.mezon.ai/198b7117db001000/2122180489040105472_pasted_image_1794802215552_0.png?1794803450-2Zo8db8MRVnVm9qwMzSilZzXa2%2F1v2WP%2FSKoY6TpJHI%3D"))
+
+	adminIDsStr := strings.TrimSpace(env("SPORT_ADMIN_USER_IDS", "1783440675396653056"))
+	var adminIDs []string
+	for _, id := range strings.Split(adminIDsStr, ",") {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			adminIDs = append(adminIDs, id)
+		}
+	}
+	cfg.Sport.AdminUserIDs = adminIDs
 
 	// VinhHub (Energy Hub)
 	cfg.VinhHub.DefaultImage = env("VINHHUB_DEFAULT_IMAGE", "https://cdn.mezon.ai/1994479556801000/2121182274450886656_SG_Energy_Hub_3.png?1794795387-WzdD7%2B%2BoP9%2F%2FyK5Q%2BnpIXfGobTpgQyfZ8sasb74aXCc%3D")

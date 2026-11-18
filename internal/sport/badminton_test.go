@@ -1025,3 +1025,142 @@ func TestMarkPaidSelf(t *testing.T) {
 	}
 }
 
+func TestParseMatchSchedule(t *testing.T) {
+	loc := time.FixedZone("ICT", 7*3600)
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, loc) // Wednesday 18/11/2026
+
+	// Case 1: Empty input -> NextMatchInfo (Thursday 19/11)
+	d1, dt1, tm1, _, spec1, err := ParseMatchSchedule("", now, loc)
+	if err != nil || d1 != "Thứ Năm" || dt1 != "19/11/2026" || spec1 {
+		t.Errorf("Case 1 failed: day=%s date=%s time=%s spec=%v err=%v", d1, dt1, tm1, spec1, err)
+	}
+
+	// Case 2: "toi nay 19:30"
+	d2, dt2, tm2, _, spec2, err := ParseMatchSchedule("toi nay 19:30", now, loc)
+	if err != nil || d2 != "Thứ Tư" || dt2 != "18/11/2026" || tm2 != "19:30" || !spec2 {
+		t.Errorf("Case 2 failed: day=%s date=%s time=%s spec=%v err=%v", d2, dt2, tm2, spec2, err)
+	}
+
+	// Case 3: "t4 19:30 san 3"
+	d3, dt3, tm3, c3, spec3, err := ParseMatchSchedule("t4 19:30 san 3", now, loc)
+	if err != nil || d3 != "Thứ Tư" || dt3 != "18/11/2026" || tm3 != "19:30" || c3 != "Sân 3" || !spec3 {
+		t.Errorf("Case 3 failed: day=%s date=%s time=%s court=%s spec=%v err=%v", d3, dt3, tm3, c3, spec3, err)
+	}
+
+	// Case 4: "t2 19:00" -> Next Monday 23/11/2026
+	d4, dt4, tm4, _, spec4, err := ParseMatchSchedule("t2 19:00", now, loc)
+	if err != nil || d4 != "Thứ Hai" || dt4 != "23/11/2026" || tm4 != "19:00" || !spec4 {
+		t.Errorf("Case 4 failed: day=%s date=%s time=%s spec=%v err=%v", d4, dt4, tm4, spec4, err)
+	}
+
+	// Case 5: "19/11 20:00" -> 19/11/2026
+	d5, dt5, tm5, _, spec5, err := ParseMatchSchedule("19/11 20:00", now, loc)
+	if err != nil || d5 != "Thứ Năm" || dt5 != "19/11/2026" || tm5 != "20:00" || !spec5 {
+		t.Errorf("Case 5 failed: day=%s date=%s time=%s spec=%v err=%v", d5, dt5, tm5, spec5, err)
+	}
+}
+
+func TestConfirmAndCancelMatch_Permissions(t *testing.T) {
+	sender := &mockSender{}
+	mgr := NewManager(Config{
+		Enabled:      true,
+		ChannelID:    "chan1",
+		RoleName:     "Vinh-CL",
+		AdminUserIDs: []string{"1783440675396653056"},
+		StatePath:    filepath.Join(t.TempDir(), "state.json"),
+	}, sender)
+
+	adminID := "1783440675396653056"
+	strangerID := "9999999999999999999"
+
+	// 1. Check IsAdmin
+	if !mgr.IsAdmin(adminID) {
+		t.Errorf("expected adminID %s to be admin", adminID)
+	}
+	if mgr.IsAdmin(strangerID) {
+		t.Errorf("expected strangerID %s NOT to be admin", strangerID)
+	}
+
+	// 2. Stranger attempts ConfirmMatch -> should fail with unauthorized error
+	_, err := mgr.ConfirmMatch(context.Background(), strangerID, "stranger", "19:30")
+	if err == nil {
+		t.Errorf("expected error when stranger confirms match")
+	}
+
+	// 3. Admin confirms match
+	msg, err := mgr.ConfirmMatch(context.Background(), adminID, "dai.trinhduc", "t4 19:30 san 3")
+	if err != nil {
+		t.Fatalf("admin ConfirmMatch failed: %v", err)
+	}
+	if !mgr.IsConfirmed() {
+		t.Errorf("expected manager to be confirmed")
+	}
+	if !strings.Contains(msg, "ĐÃ XÁC NHẬN LỊCH ĐÁNH CẦU") || !strings.Contains(msg, "19:30") {
+		t.Errorf("unexpected confirm message: %s", msg)
+	}
+
+	// 4. Stranger attempts CancelMatch -> should fail
+	_, err = mgr.CancelMatch(context.Background(), strangerID, "stranger")
+	if err == nil {
+		t.Errorf("expected error when stranger cancels match")
+	}
+
+	// 5. Admin cancels match
+	cancelMsg, err := mgr.CancelMatch(context.Background(), adminID, "dai.trinhduc")
+	if err != nil {
+		t.Fatalf("admin CancelMatch failed: %v", err)
+	}
+	if mgr.IsConfirmed() {
+		t.Errorf("expected manager to NOT be confirmed after cancel")
+	}
+	if !strings.Contains(cancelMsg, "THÔNG BÁO HỦY LỊCH") {
+		t.Errorf("unexpected cancel message: %s", cancelMsg)
+	}
+}
+
+func TestTick_ReminderOnlyWhenConfirmed(t *testing.T) {
+	sender := &mockSender{}
+	loc := time.FixedZone("ICT", 7*3600)
+	mgr := NewManager(Config{
+		Enabled:      true,
+		ChannelID:    "chan1",
+		RoleName:     "Vinh-CL",
+		AdminUserIDs: []string{"1783440675396653056"},
+		Timezone:     loc,
+		StatePath:    filepath.Join(t.TempDir(), "state.json"),
+	}, sender)
+
+	matchDate := "18/11/2026"
+	mgr.state.MatchDate = matchDate
+	mgr.state.MatchDay = "Thứ Tư"
+	mgr.state.MatchTime = "19:30"
+	mgr.state.Confirmed = false // NOT confirmed!
+
+	// 18:30 on match date (1 hour before 19:30)
+	tickTime := time.Date(2026, 11, 18, 18, 30, 0, 0, loc)
+
+	// Tick when unconfirmed: should NOT send reminder
+	mgr.tick(context.Background(), tickTime)
+	if sender.invocations > 0 {
+		t.Fatalf("expected NO reminder sent when unconfirmed, got %d invocations", sender.invocations)
+	}
+
+	// Now confirm by admin
+	_, err := mgr.ConfirmMatch(context.Background(), "1783440675396653056", "dai.trinhduc", "19:30")
+	if err != nil {
+		t.Fatalf("ConfirmMatch failed: %v", err)
+	}
+	sender.invocations = 0
+	sender.lastText = ""
+
+	// Tick when confirmed: SHOULD send reminder
+	mgr.state.LastReminder = "" // clear last reminder
+	mgr.tick(context.Background(), tickTime)
+	if sender.invocations == 0 {
+		t.Fatalf("expected reminder sent when confirmed!")
+	}
+	if !strings.Contains(sender.lastText, "NHẮC LỊCH ĐÁNH CẦU") {
+		t.Errorf("unexpected reminder message: %s", sender.lastText)
+	}
+}
+

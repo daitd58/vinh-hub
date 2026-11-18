@@ -105,6 +105,10 @@ type AttendanceState struct {
 	MatchDay                   string                 `json:"match_day"`           // e.g. "Thứ Ba"
 	MatchDate                  string                 `json:"match_date"`          // e.g. "17/11/2026"
 	MatchTime                  string                 `json:"match_time"`          // e.g. "18:00"
+	Confirmed                  bool                   `json:"confirmed"`           // officially confirmed by admin
+	ConfirmedBy                string                 `json:"confirmed_by,omitempty"`
+	ConfirmedAt                *time.Time             `json:"confirmed_at,omitempty"`
+	CourtBooked                string                 `json:"court_booked,omitempty"`
 	LastDiemDanh               string                 `json:"last_diemdanh"`       // e.g. "2026-11-16_09"
 	LastReminder               string                 `json:"last_reminder"`       // e.g. "2026-11-17_17"
 	Messages                   []MessageRecord        `json:"messages"`
@@ -145,6 +149,7 @@ type Config struct {
 	OpenAIModel   string
 	GeminiKey     string
 	PaymentQR     string
+	AdminUserIDs  []string
 	Timezone      *time.Location
 	Log           *slog.Logger
 }
@@ -188,6 +193,10 @@ func NewManager(cfg Config, sender MessageSender) *Manager {
 		logger = slog.Default()
 	}
 
+	if len(cfg.AdminUserIDs) == 0 {
+		cfg.AdminUserIDs = []string{"1783440675396653056"}
+	}
+
 	regPath := "clan_users.json"
 	if cfg.StatePath != "" {
 		regPath = filepath.Join(filepath.Dir(cfg.StatePath), "clan_users.json")
@@ -220,6 +229,32 @@ func (m *Manager) ResolveDisplayName(userID, username string) string {
 		return userID
 	}
 	return m.registry.ResolveDisplayName(userID, username)
+}
+
+// IsAdmin returns true if the userID is authorized to confirm or cancel match schedules.
+func (m *Manager) IsAdmin(userID string) bool {
+	if userID == "1783440675396653056" {
+		return true
+	}
+	if m == nil {
+		return false
+	}
+	for _, id := range m.cfg.AdminUserIDs {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// IsConfirmed returns true if the current match schedule is officially confirmed.
+func (m *Manager) IsConfirmed() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.state.Confirmed
 }
 
 func (m *Manager) loadState() {
@@ -465,31 +500,45 @@ func (m *Manager) tick(ctx context.Context, now time.Time) {
 		}
 	}
 
-	// 2. Match Reminder on match days (Tuesday, Thursday, Saturday):
-	// Reads messages to detect the confirmed booking time (e.g. 19:00 vs 19:30, or Saturday 14:00)
-	// and sends the reminder 1 hour beforehand.
-	isMatchDay := (weekday == time.Tuesday || weekday == time.Thursday || weekday == time.Saturday)
-	if isMatchDay {
-		m.mu.Lock()
-		msgs := append([]MessageRecord(nil), m.state.Messages...)
-		m.mu.Unlock()
+	// 2. Match Reminder on confirmed match day:
+	// ONLY send reminder if the match has been officially confirmed by admin
+	// AND today matches the confirmed MatchDate.
+	m.mu.Lock()
+	confirmed := m.state.Confirmed
+	matchDateStr := m.state.MatchDate
+	mTime := m.state.MatchTime
+	msgs := append([]MessageRecord(nil), m.state.Messages...)
+	m.mu.Unlock()
 
+	todayStr := now.Format("02/01/2006")
+	if confirmed && matchDateStr != "" && todayStr == matchDateStr {
 		isSat := (weekday == time.Saturday)
 		matchHour, matchMin, foundTime, matchTimeStr := ExtractMatchTime(msgs, isSat)
+
+		if !foundTime && mTime != "" {
+			if h, mn, ok := parseHourMin(mTime); ok {
+				matchHour = h
+				matchMin = mn
+				foundTime = true
+				matchTimeStr = fmt.Sprintf("%02d:%02d", h, mn)
+			}
+		}
 
 		remindHour := matchHour - 1
 		remindMin := matchMin
 
 		// If time was not explicitly found in messages, set fallback default:
-		// - Tue/Thu: remind at 18:00 (1 hour before 19:00)
+		// - Weekday: remind at 18:00 (1 hour before 19:00)
 		// - Sat: remind at 13:00 (1 hour before 14:00)
 		if !foundTime {
 			if isSat {
 				remindHour = 13
 				remindMin = 0
+				matchTimeStr = "14:00"
 			} else {
 				remindHour = 18
 				remindMin = 0
+				matchTimeStr = "19:00 - 19:30"
 			}
 		}
 
@@ -504,7 +553,7 @@ func (m *Manager) tick(ctx context.Context, now time.Time) {
 				m.saveStateLocked()
 				m.mu.Unlock()
 
-				m.log.Info("triggering match reminder based on detected time",
+				m.log.Info("triggering confirmed match reminder based on detected time",
 					"detected_time", matchTimeStr, "found", foundTime, "remind_at", fmt.Sprintf("%02d:%02d", remindHour, remindMin))
 
 				if err := m.TriggerReminderWithTime(ctx, now, matchTimeStr, foundTime); err != nil {
@@ -595,6 +644,162 @@ func ExtractMatchTime(messages []MessageRecord, isSaturday bool) (hour int, min 
 	return 19, 0, false, "19:00 - 19:30"
 }
 
+func parseHourMin(s string) (hour int, min int, ok bool) {
+	s = strings.TrimSpace(s)
+	reColon := regexp.MustCompile(`\b(1[2-9]|2[0-2]):([0-5][0-9])\b`)
+	if m := reColon.FindStringSubmatch(s); len(m) == 3 {
+		h, _ := strconv.Atoi(m[1])
+		mn, _ := strconv.Atoi(m[2])
+		return h, mn, true
+	}
+	reHM := regexp.MustCompile(`\b(1[2-9]|2[0-2])h([0-5][0-9])\b`)
+	if m := reHM.FindStringSubmatch(s); len(m) == 3 {
+		h, _ := strconv.Atoi(m[1])
+		mn, _ := strconv.Atoi(m[2])
+		return h, mn, true
+	}
+	reH := regexp.MustCompile(`\b(1[2-9]|2[0-2])h\b`)
+	if m := reH.FindStringSubmatch(s); len(m) == 2 {
+		h, _ := strconv.Atoi(m[1])
+		return h, 0, true
+	}
+	reEveningHM := regexp.MustCompile(`\b([6-9])h([0-5][0-9])\b`)
+	if m := reEveningHM.FindStringSubmatch(s); len(m) == 3 {
+		h, _ := strconv.Atoi(m[1])
+		mn, _ := strconv.Atoi(m[2])
+		return h + 12, mn, true
+	}
+	reEveningH := regexp.MustCompile(`\b([6-9])h\b`)
+	if m := reEveningH.FindStringSubmatch(s); len(m) == 2 {
+		h, _ := strconv.Atoi(m[1])
+		return h + 12, 0, true
+	}
+	return 0, 0, false
+}
+
+// ParseMatchSchedule parses flexible date/time/court strings from user input.
+// Supports inputs like "toi nay 19:30", "t4 19:00", "t2 20:00 san 3", "19/11 19:30", etc.
+func ParseMatchSchedule(input string, now time.Time, loc *time.Location) (matchDay, matchDate, matchTime, court string, dateSpecified bool, err error) {
+	if loc == nil {
+		loc = time.Local
+	}
+	now = now.In(loc)
+	input = strings.TrimSpace(input)
+	if input == "" {
+		mDay, mDate, mTime := NextMatchInfo(now)
+		return mDay, mDate, mTime, "", false, nil
+	}
+
+	low := strings.ToLower(input)
+
+	// 1. Parse Court info if specified (e.g. "san 3", "sân số 2", "sân ĐH Vinh")
+	reCourt := regexp.MustCompile(`(?i)(?:sân|san)\s+([^,]+?)(?:\s+(?:lúc|luc|\d{1,2}h|\d{1,2}:)|$)`)
+	if m := reCourt.FindStringSubmatch(input); len(m) >= 2 {
+		courtVal := strings.TrimSpace(m[1])
+		if !strings.HasPrefix(strings.ToLower(courtVal), "sân") && !strings.HasPrefix(strings.ToLower(courtVal), "san") {
+			court = "Sân " + courtVal
+		} else {
+			court = courtVal
+		}
+	}
+
+	// 2. Parse Date
+	targetDate := time.Time{}
+	dateSpecified = false
+
+	// Check DD/MM or DD/MM/YYYY
+	reDate := regexp.MustCompile(`\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b`)
+	if m := reDate.FindStringSubmatch(low); len(m) >= 3 {
+		d, _ := strconv.Atoi(m[1])
+		mo, _ := strconv.Atoi(m[2])
+		y := now.Year()
+		if len(m) > 3 && m[3] != "" {
+			y, _ = strconv.Atoi(m[3])
+		}
+		targetDate = time.Date(y, time.Month(mo), d, 0, 0, 0, 0, loc)
+		dateSpecified = true
+	}
+
+	// Check relative date keywords
+	if !dateSpecified {
+		if strings.Contains(low, "hom nay") || strings.Contains(low, "hôm nay") ||
+			strings.Contains(low, "toi nay") || strings.Contains(low, "tối nay") ||
+			strings.Contains(low, "chieu nay") || strings.Contains(low, "chiều nay") {
+			targetDate = now
+			dateSpecified = true
+		} else if strings.Contains(low, "ngay mai") || strings.Contains(low, "ngày mai") ||
+			strings.Contains(low, "mai") {
+			targetDate = now.AddDate(0, 0, 1)
+			dateSpecified = true
+		} else if strings.Contains(low, "ngay kia") || strings.Contains(low, "ngày kia") ||
+			strings.Contains(low, "mốt") || strings.Contains(low, "mot") {
+			targetDate = now.AddDate(0, 0, 2)
+			dateSpecified = true
+		}
+	}
+
+	// Check day of week (t2, t3, t4, t5, t6, t7, cn...)
+	if !dateSpecified {
+		type dayMatcher struct {
+			patterns []string
+			weekday  time.Weekday
+		}
+		matchers := []dayMatcher{
+			{patterns: []string{"t2", "thứ 2", "thu 2", "thứ hai", "thu hai"}, weekday: time.Monday},
+			{patterns: []string{"t3", "thứ 3", "thu 3", "thứ ba", "thu ba"}, weekday: time.Tuesday},
+			{patterns: []string{"t4", "thứ 4", "thu 4", "thứ tư", "thu tu"}, weekday: time.Wednesday},
+			{patterns: []string{"t5", "thứ 5", "thu 5", "thứ năm", "thu nam"}, weekday: time.Thursday},
+			{patterns: []string{"t6", "thứ 6", "thu 6", "thứ sáu", "thu sau"}, weekday: time.Friday},
+			{patterns: []string{"t7", "thứ 7", "thu 7", "thứ bảy", "thu bay"}, weekday: time.Saturday},
+			{patterns: []string{"cn", "chủ nhật", "chu nhat"}, weekday: time.Sunday},
+		}
+
+		for _, dm := range matchers {
+			matched := false
+			for _, pat := range dm.patterns {
+				rePat := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(pat) + `\b`)
+				if rePat.MatchString(low) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				currWeekday := now.Weekday()
+				diff := int(dm.weekday - currWeekday)
+				if diff < 0 {
+					diff += 7
+				}
+				targetDate = now.AddDate(0, 0, diff)
+				dateSpecified = true
+				break
+			}
+		}
+	}
+
+	if dateSpecified {
+		matchDate = targetDate.Format("02/01/2006")
+		matchDay = DayOfWeekVietnamese(targetDate.Weekday())
+	} else {
+		mDay, mDate, _ := NextMatchInfo(now)
+		matchDay = mDay
+		matchDate = mDate
+	}
+
+	// 3. Parse Time
+	isSat := matchDay == "Thứ Bảy"
+	if h, mn, ok := parseHourMin(low); ok {
+		matchTime = fmt.Sprintf("%02d:%02d", h, mn)
+	} else if dateSpecified {
+		if isSat {
+			matchTime = "14:00"
+		} else {
+			matchTime = "19:00 - 19:30"
+		}
+	}
+
+	return matchDay, matchDate, matchTime, court, dateSpecified, nil
+}
+
 // NextMatchInfo returns the match day and time for a check-in call on the given day.
 func NextMatchInfo(now time.Time) (matchDay, matchDate, matchTime string) {
 	weekday := now.Weekday()
@@ -650,10 +855,39 @@ func DayOfWeekVietnamese(w time.Weekday) string {
 	}
 }
 
-// TriggerDiemDanh sends the attendance call message to the sport channel.
+// TriggerDiemDanh sends the default attendance call message to the sport channel.
 func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 	matchDay, matchDate, matchTime := NextMatchInfo(now)
+	return m.triggerDiemDanhInternal(ctx, now, matchDay, matchDate, matchTime, "")
+}
 
+// TriggerDiemDanhWithArgs parses flexible args (e.g. "toi nay 19:30", "t4 19:30 san 3") and sends the attendance call.
+func (m *Manager) TriggerDiemDanhWithArgs(ctx context.Context, now time.Time, args string) error {
+	now = now.In(m.cfg.Timezone)
+	args = strings.TrimSpace(args)
+	matchDay, matchDate, matchTime := NextMatchInfo(now)
+	court := ""
+
+	if args != "" {
+		d, dt, tm, c, dateSpecified, err := ParseMatchSchedule(args, now, m.cfg.Timezone)
+		if err == nil {
+			if dateSpecified {
+				matchDay = d
+				matchDate = dt
+			}
+			if tm != "" {
+				matchTime = tm
+			}
+			if c != "" {
+				court = c
+			}
+		}
+	}
+
+	return m.triggerDiemDanhInternal(ctx, now, matchDay, matchDate, matchTime, court)
+}
+
+func (m *Manager) triggerDiemDanhInternal(ctx context.Context, now time.Time, matchDay, matchDate, matchTime, court string) error {
 	m.mu.Lock()
 	// Archive previous match session participants before starting fresh attendance
 	var prev []Participant
@@ -706,6 +940,10 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 	m.state.MatchDay = matchDay
 	m.state.MatchDate = matchDate
 	m.state.MatchTime = matchTime
+	m.state.CourtBooked = court
+	m.state.Confirmed = false
+	m.state.ConfirmedBy = ""
+	m.state.ConfirmedAt = nil
 	m.state.DiemDanhMessageID = ""
 	// Clear current session messages and reactions to start fresh attendance collection
 	m.state.Messages = make([]MessageRecord, 0)
@@ -716,12 +954,18 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 	m.mu.Unlock()
 
 	tag := "@" + m.cfg.RoleName
+	courtNotice := ""
+	if court != "" {
+		courtNotice = fmt.Sprintf(" tại **%s**", court)
+	}
+
 	msg := fmt.Sprintf(
 		"🏸 **[ĐIỂM DANH CẦU LÔNG - %s (%s)]**\n\n"+
-			"Chào cả nhà %s! Lịch đánh cầu lông tiếp theo diễn ra vào **%s (%s)** (khung giờ dự kiến: **%s**).\n\n"+
+			"Chào cả nhà %s! Lịch đánh cầu lông tiếp theo diễn ra vào **%s (%s)** (khung giờ dự kiến: **%s**)%s.\n\n"+
 			"👉 Mọi người vào điểm danh xác nhận tham gia trước **16:00** chiều nay để tiện chốt người và đặt sân nhé! 🔥\n\n"+
-			"*(Đi thì react :cong1:, không đi thì react :tru1: vào tin nhắn này nhé!)*",
-		strings.ToUpper(matchDay), matchDate, tag, matchDay, matchDate, matchTime,
+			"*(Đi thì react :cong1:, không đi thì react :tru1: vào tin nhắn này nhé!)*\n"+
+			"*(Lịch thi đấu sẽ được Quản trị viên (@dai.trinhduc) chốt chính thức bằng lệnh `*confirm`)*",
+		strings.ToUpper(matchDay), matchDate, tag, matchDay, matchDate, matchTime, courtNotice,
 	)
 
 	msgID, err := m.sendWithRoleMention(ctx, msg)
@@ -743,6 +987,108 @@ func (m *Manager) TriggerDiemDanh(ctx context.Context, now time.Time) error {
 	}
 
 	return nil
+}
+
+// ConfirmMatch confirms the current or custom match schedule. Only authorized admins can call this.
+func (m *Manager) ConfirmMatch(ctx context.Context, userID, username, args string) (string, error) {
+	if !m.IsAdmin(userID) {
+		return "", fmt.Errorf("bạn không có quyền xác nhận lịch đấu. Chỉ quản trị viên mới có thể chốt lịch")
+	}
+
+	now := time.Now().In(m.cfg.Timezone)
+	args = strings.TrimSpace(args)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if args != "" {
+		d, dt, tm, c, dateSpecified, err := ParseMatchSchedule(args, now, m.cfg.Timezone)
+		if err == nil {
+			if dateSpecified {
+				m.state.MatchDay = d
+				m.state.MatchDate = dt
+			}
+			if tm != "" {
+				m.state.MatchTime = tm
+			}
+			if c != "" {
+				m.state.CourtBooked = c
+			}
+		}
+	}
+
+	if m.state.MatchDate == "" {
+		mDay, mDate, mTime := NextMatchInfo(now)
+		m.state.MatchDay = mDay
+		m.state.MatchDate = mDate
+		m.state.MatchTime = mTime
+	}
+
+	m.state.Confirmed = true
+	m.state.ConfirmedBy = username
+	m.state.ConfirmedAt = &now
+	m.saveStateLocked()
+
+	tag := "@" + m.cfg.RoleName
+	goingCount := len(m.state.GoingParticipants)
+	if goingCount == 0 {
+		goingCount = len(m.state.ReactionsGoing)
+	}
+
+	courtStr := m.state.CourtBooked
+	if courtStr == "" {
+		courtStr = "Sẽ cập nhật trước giờ đánh"
+	}
+
+	msg := fmt.Sprintf(
+		"🏸 **[ĐÃ XÁC NHẬN LỊCH ĐÁNH CẦU - %s (%s)]** ✅\n\n"+
+			"Quản trị viên @%s đã **chốt lịch chính thức** cho %s:\n"+
+			"• 📅 **Ngày:** **%s (%s)**\n"+
+			"• ⏰ **Giờ:** **%s**\n"+
+			"• 🏟️ **Sân:** %s\n"+
+			"• 👥 **Số người tham gia hiện tại:** %d người\n\n"+
+			"👉 Bot sẽ gửi thông báo nhắc trước **1 tiếng** cho mọi người chuẩn bị đồ nhé! 🔥",
+		strings.ToUpper(m.state.MatchDay), m.state.MatchDate,
+		username, tag,
+		m.state.MatchDay, m.state.MatchDate,
+		m.state.MatchTime,
+		courtStr,
+		goingCount,
+	)
+
+	_, err := m.sendWithRoleMention(ctx, msg)
+	return msg, err
+}
+
+// CancelMatch cancels the current match schedule. Only authorized admins can call this.
+func (m *Manager) CancelMatch(ctx context.Context, userID, username string) (string, error) {
+	if !m.IsAdmin(userID) {
+		return "", fmt.Errorf("bạn không có quyền hủy lịch thi đấu. Chỉ quản trị viên mới có thể hủy lịch")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	day := m.state.MatchDay
+	date := m.state.MatchDate
+
+	m.state.Confirmed = false
+	m.state.ConfirmedBy = ""
+	m.state.ConfirmedAt = nil
+	m.state.CourtBooked = ""
+	m.saveStateLocked()
+
+	tag := "@" + m.cfg.RoleName
+	msg := fmt.Sprintf(
+		"📢 **[THÔNG BÁO HỦY LỊCH ĐÁNH CẦU - %s (%s)]** ❌\n\n"+
+			"Chào %s, Quản trị viên @%s đã **hủy buổi đánh cầu** ngày %s (%s).\n"+
+			"Bot sẽ không gửi tin nhắc lịch cho buổi này nữa.",
+		strings.ToUpper(day), date,
+		tag, username, day, date,
+	)
+
+	_, err := m.sendWithRoleMention(ctx, msg)
+	return msg, err
 }
 
 // TriggerReminder compiles an AI summary of attendance messages and sends a 1-hour pre-match reminder.
@@ -1269,12 +1615,40 @@ func (m *Manager) sendWithRoleMention(ctx context.Context, text string) (string,
 func (m *Manager) GetSummary(ctx context.Context) string {
 	m.mu.Lock()
 	messages := append([]MessageRecord(nil), m.state.Messages...)
+	confirmed := m.state.Confirmed
+	confirmedBy := m.state.ConfirmedBy
+	matchDay := m.state.MatchDay
+	matchDate := m.state.MatchDate
+	matchTime := m.state.MatchTime
+	courtBooked := m.state.CourtBooked
 	m.mu.Unlock()
 
 	summary := m.SummarizeMessages(ctx, messages)
 
 	var sb strings.Builder
-	sb.WriteString("📋 **TÌNH HÌNH ĐIỂM DANH HIỆN TẠI:**\n")
+	sb.WriteString("📋 **TÌNH HÌNH ĐIỂM DANH HIỆN TẠI")
+	if matchDay != "" && matchDate != "" {
+		sb.WriteString(fmt.Sprintf(" - %s (%s)", strings.ToUpper(matchDay), matchDate))
+	}
+	sb.WriteString(":**\n")
+
+	// Status badge
+	if confirmed {
+		byStr := ""
+		if confirmedBy != "" {
+			byStr = fmt.Sprintf(" bởi @%s", confirmedBy)
+		}
+		sb.WriteString(fmt.Sprintf("• 🟢 **Trạng thái:** **ĐÃ CHỐT LỊCH CHÍNH THỨC**%s ✅\n", byStr))
+		if matchTime != "" {
+			sb.WriteString(fmt.Sprintf("• ⏰ **Giờ đánh:** %s\n", matchTime))
+		}
+	} else {
+		sb.WriteString("• 🟡 **Trạng thái:** **CHƯA CHỐT LỊCH** (Chờ Quản trị viên gõ `*confirm` để chốt) ⏳\n")
+		if matchTime != "" {
+			sb.WriteString(fmt.Sprintf("• ⏰ **Giờ dự kiến:** %s\n", matchTime))
+		}
+	}
+
 	if len(summary.Going) > 0 {
 		slotText := fmt.Sprintf("%d người", len(summary.Going))
 		if summary.TotalSlots > len(summary.Going) {
@@ -1289,7 +1663,10 @@ func (m *Manager) GetSummary(ctx context.Context) string {
 		sb.WriteString(fmt.Sprintf("• ❌ **Vắng mặt (%d người):** %s\n", len(summary.NotGoing), strings.Join(summary.NotGoing, ", ")))
 	}
 
-	court := strings.TrimSpace(summary.CourtInfo)
+	court := courtBooked
+	if court == "" {
+		court = strings.TrimSpace(summary.CourtInfo)
+	}
 	if court != "" && !strings.EqualFold(court, "Chưa có thông tin sân") {
 		sb.WriteString(fmt.Sprintf("• 🏟️ **Sân:** %s\n", court))
 	} else {

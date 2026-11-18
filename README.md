@@ -136,6 +136,7 @@ Settings are loaded from `.env` in the project root:
 | `SPORT_CHANNEL_ID` | No | Sport channel ID (Vinh-sport-club), default `1840689219983380480` |
 | `SPORT_ROLE_ID` | No | Role ID of `@Vinh-CL` to mention, default `1840693979155271680` |
 | `SPORT_ROLE_NAME` | No | Role name to display, default `Vinh-CL` |
+| `SPORT_ADMIN_USER_IDS` | No | Comma-separated admin user IDs permitted to confirm/cancel schedules (default includes `1783440675396653056`) |
 | `SPORT_STATE_PATH` | No | Path to persist attendance messages and session, default `badminton_state.json` |
 | `OPENAI_API_KEY` | Optional | API key for OpenAI-compatible endpoint (used first for AI summary) |
 | `OPENAI_BASE_URL` | Optional | Base URL for OpenAI-compatible endpoint, default `https://llm.mrdnd.dev/v1` |
@@ -190,9 +191,11 @@ When the bot is running in your channel or thread:
 - `*vinhhub`: Gửi ảnh menu VinhCorner Energy Hub (tự động tạo chữ ký Mezon CDN socket mới mỗi lần gửi để không bao giờ bị lỗi 403, thay thế hoàn toàn bot KOMU).
 - `*register vinhhub <link_image>`: Cập nhật hoặc đổi link ảnh menu mới (lưu vào `vinhhub_state.json`).
 - `*delete vinhhub`: Xoá ảnh tuỳ chỉnh và khôi phục ảnh menu mặc định.
-- `*diemdanh` (hoặc `*vinhhub diemdanh`): Kích hoạt ngay thông báo điểm danh cho buổi đánh tiếp theo (ping role `@Vinh-CL`).
-- `*nhaclich`: Gửi ngay tin nhắn nhắc lịch kèm AI tóm tắt danh sách tham gia, vắng mặt, và sân bãi.
-- `*summary`: Xem nhanh tình hình điểm danh hiện tại mà không cần đợi cron.
+- `*diemdanh [ngày/thứ] [giờ]` (hoặc `*vinhhub diemdanh`): Kích hoạt thông báo điểm danh linh hoạt theo ngày giờ (ví dụ: `*diemdanh`, `*diemdanh toi nay 19:30`, `*diemdanh t4 19:00`, `*diemdanh t2 20:00 san 3`). Ping role `@Vinh-CL`.
+- `*confirm [giờ] [sân]` (hoặc `*chotlich`, `*chot`, `*doilich`): **Phân quyền cho Quản trị viên (`userId: 1783440675396653056`)**. Chốt lịch thi đấu chính thức để bot kích hoạt nhắc lịch trước 1 tiếng. Nếu chưa confirm, bot tuyệt đối không tự động nhắc lịch (tránh việc anh em chat trêu đùa bị bot hiểu nhầm).
+- `*huylich` (hoặc `*cancel`, `*huy`): **Chỉ dành cho Quản trị viên**. Hủy buổi đánh cầu hiện tại, bot sẽ dừng gửi nhắc lịch.
+- `*nhaclich`: Gửi ngay tin nhắn nhắc lịch kèm AI tóm tắt danh sách tham gia, vắng mặt, và sân bãi (yêu cầu lịch đã được confirm).
+- `*summary`: Xem nhanh tình hình điểm danh hiện tại kèm huy hiệu trạng thái `[🟢 ĐÃ CHỐT LỊCH]` hoặc `[🟡 CHỜ XÁC NHẬN]`.
 - `*split <công_thức> [tag]`: Chia tiền sân + cầu linh hoạt (ví dụ: `*split 360k + 26*9`, `*split 360k + 26*9 @user1 @user2`, `*split 360k san 45k cau`, `*split 450k`).
   - Nếu **không tag**: Tự động lấy danh sách người tham gia từ buổi điểm danh gần nhất.
   - Nếu **có tag**: Chia trực tiếp cho những người được tag (hỗ trợ số slot tuỳ chọn: `@user:2 @user2:1` hoặc `[@user1, @user2]`).
