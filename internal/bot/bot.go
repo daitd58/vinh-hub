@@ -14,6 +14,7 @@ import (
 	mezon "github.com/quangledang23/mezon-sdk-go"
 	"github.com/quangledang23/mezon-sdk-go/api"
 
+	"vinh-hub/internal/countdown"
 	"vinh-hub/internal/fund"
 	"vinh-hub/internal/sport"
 	"vinh-hub/internal/vinhhub"
@@ -638,8 +639,21 @@ func (b *Bot) handleMessage(m *mezon.ChannelMessage) {
 		cmd == "*stats" || strings.HasPrefix(cmd, "*stats ") || cmd == "!stats" || strings.HasPrefix(cmd, "!stats ") ||
 		cmd == "*top" || strings.HasPrefix(cmd, "*top "):
 		b.handleBXHCommand(m, text)
-	case strings.HasPrefix(cmd, "*register qr") || strings.HasPrefix(cmd, "!register qr") || strings.HasPrefix(cmd, "/register qr"):
+	case cmd == "*register qr" || strings.HasPrefix(cmd, "*register qr ") || cmd == "!register qr" || strings.HasPrefix(cmd, "!register qr ") || cmd == "/register qr" || strings.HasPrefix(cmd, "/register qr "):
 		b.handleRegisterQRCommand(m, text)
+	case cmd == "*demngaynhanluong" || cmd == "!demngaynhanluong" || cmd == "/demngaynhanluong":
+		b.handleCountdownCommand(m, "nhanluong")
+	case cmd == "*demngaytetam" || cmd == "!demngaytetam" || cmd == "/demngaytetam":
+		b.handleCountdownCommand(m, "tetam")
+	case cmd == "*demngaytetduong" || cmd == "!demngaytetduong" || cmd == "/demngaytetduong":
+		b.handleCountdownCommand(m, "tetduong")
+	case cmd == "*demngaygiangsinh" || cmd == "!demngaygiangsinh" || cmd == "/demngaygiangsinh":
+		b.handleCountdownCommand(m, "giangsinh")
+	case cmd == "*demngaytrungthu" || cmd == "!demngaytrungthu" || cmd == "/demngaytrungthu":
+		b.handleCountdownCommand(m, "trungthu")
+	case cmd == "*demngayyep" || cmd == "!demngayyep" || cmd == "/demngayyep" ||
+		cmd == "*demngayep" || cmd == "!demngayep" || cmd == "/demngayep":
+		b.handleCountdownCommand(m, "yep")
 	}
 }
 
@@ -1718,6 +1732,119 @@ func (b *Bot) handleRegisterQRCommand(m *mezon.ChannelMessage, rawText string) {
 	_ = b.reply(m, fmt.Sprintf("✅ Đã cập nhật mã QR thanh toán thành công!\nLink: %s", newQR))
 }
 
+func (b *Bot) handleCountdownCommand(m *mezon.ChannelMessage, kind string) {
+	tz := b.cfg.Timezone
+	if tz == nil {
+		tz = time.Local
+	}
+	now := time.Now().In(tz)
+
+	var embed map[string]any
+	switch kind {
+	case "nhanluong":
+		embed = countdown.BuildLuongEmbed(now, false)
+	case "tetam":
+		embed = countdown.BuildTetAmEmbed(now)
+	case "tetduong":
+		embed = countdown.BuildTetDuongEmbed(now)
+	case "giangsinh":
+		embed = countdown.BuildGiangSinhEmbed(now)
+	case "trungthu":
+		embed = countdown.BuildTrungThuEmbed(now)
+	case "yep":
+		embed = countdown.BuildYepEmbed(now)
+	default:
+		return
+	}
+
+	sentMsg, err := b.replyEmbed(m, embed)
+	if err != nil {
+		b.logger().Error("failed to reply countdown embed", "kind", kind, "err", err)
+		return
+	}
+	if sentMsg == nil || sentMsg.ID == "" {
+		return
+	}
+
+	// Wait 1300ms for slot-machine animation and update message to show result
+	go func(msg *mezon.Message, emb map[string]any) {
+		time.Sleep(1300 * time.Millisecond)
+		countdown.SetEmbedResult(emb)
+		updatedContent := map[string]any{
+			"embed": []any{emb},
+		}
+		if _, updateErr := msg.Update(updatedContent, nil, nil); updateErr != nil {
+			b.logger().Warn("failed to update countdown embed result", "kind", kind, "err", updateErr)
+		}
+	}(sentMsg, embed)
+}
+
+func (b *Bot) replyEmbed(m *mezon.ChannelMessage, embed map[string]any) (*mezon.Message, error) {
+	if b == nil || b.client == nil {
+		return nil, fmt.Errorf("bot client is not connected")
+	}
+
+	targetID := m.ChannelID
+	if m.TopicID != "" {
+		targetID = m.TopicID
+	}
+
+	ch, err := b.client.Channels.Fetch(targetID)
+	if err != nil && targetID != m.ChannelID && m.ChannelID != "" {
+		ch, err = b.client.Channels.Fetch(m.ChannelID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fetch channel %s: %w", targetID, err)
+	}
+
+	clanID := b.cfg.SportClanID
+	if clanID == "" && ch.Clan != nil {
+		clanID = ch.Clan.ID
+	}
+	if clanID == "" && m.ClanID != "" {
+		clanID = m.ClanID
+	}
+	if clanID == "" {
+		clanID = "0"
+	}
+
+	if clanID != "0" && (ch.Clan == nil || ch.Clan.ID == "" || ch.Clan.ID == "0") {
+		if clan, ok := b.client.Clans.Get(clanID); ok && clan != nil {
+			ch.Clan = clan
+		}
+	}
+	if ch.Clan == nil {
+		ch.Clan = &mezon.Clan{ID: clanID}
+	}
+
+	_, _ = b.client.Socket().JoinChat(clanID, ch.ID, ch.ChannelType, !ch.IsPrivate)
+
+	opts := &mezon.SendOptions{
+		TopicID: m.TopicID,
+	}
+	if m.ID != "" {
+		opts.References = []mezon.MessageRef{{
+			MessageRefID:    m.ID,
+			MessageSenderID: m.SenderID,
+		}}
+	}
+
+	content := map[string]any{
+		"embed": []any{embed},
+	}
+
+	sentMsg, err := ch.Send(content, opts)
+	if err != nil && targetID != m.ChannelID && m.ChannelID != "" {
+		if parentCh, parentErr := b.client.Channels.Fetch(m.ChannelID); parentErr == nil {
+			sentMsg, err = parentCh.Send(content, opts)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("send embed: %w", err)
+	}
+	return sentMsg, nil
+}
+
 func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 	help := "🤖 **Mezon Bot Hub**\n\n" +
 		"💰 **Quỹ & Tài chính:**\n" +
@@ -1740,6 +1867,13 @@ func (b *Bot) handleHelpCommand(m *mezon.ChannelMessage) {
 		"• `*unpaid [mã/ngày]`: Nhắc nhở người chưa đóng kèm mã QR (admin có thể tag để hủy đánh dấu nhầm)\n" +
 		"• `*bxh [tháng]`: Bảng xếp hạng \"Chiến thần quật cầu\" & \"Chúa sủi\" (ví dụ: `*bxh` hoặc `*bxh 11/2026`)\n" +
 		"• `*register qr <link>`: Admin cập nhật mã QR thanh toán mới\n\n" +
+		"⏳ **Đếm ngược sự kiện:**\n" +
+		"• `*demngaynhanluong`: Đếm ngược ngày nhận lương (ngày 5 hàng tháng)\n" +
+		"• `*demngaytetam`: Đếm ngược đến Tết Nguyên Đán\n" +
+		"• `*demngaytetduong`: Đếm ngược đến Tết Dương Lịch\n" +
+		"• `*demngaygiangsinh`: Đếm ngược đến Giáng Sinh (25/12)\n" +
+		"• `*demngaytrungthu`: Đếm ngược đến Tết Trung Thu\n" +
+		"• `*demngayyep`: Đếm ngược đến NCC Year End Party\n\n" +
 		"• `*help`: Hiển thị hướng dẫn này"
 	_ = b.reply(m, help)
 }

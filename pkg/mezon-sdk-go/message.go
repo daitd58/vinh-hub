@@ -62,7 +62,20 @@ func newMessageFromChannelMessage(cm *ChannelMessage, channel *TextChannel, sock
 }
 
 func (m *Message) mode() int {
+	if m.Channel == nil {
+		return 0
+	}
 	return int(ConvertChannelTypeToChannelMode(m.Channel.ChannelType))
+}
+
+func (m *Message) clanID() string {
+	if m.ClanID != "" {
+		return m.ClanID
+	}
+	if m.Channel != nil && m.Channel.Clan != nil {
+		return m.Channel.Clan.ID
+	}
+	return "0"
 }
 
 // Reply replies to this message, port of Message.reply. It returns the created
@@ -73,10 +86,12 @@ func (m *Message) Reply(content Content, opts *SendOptions) (*Message, error) {
 	}
 	return Enqueue(m.queue, func() (*Message, error) {
 		var senderUsername, senderAvatar string
-		if client := m.Channel.Clan.client; client != nil {
-			if user, err := client.Users.Fetch(m.SenderID); err == nil && user != nil {
-				senderUsername = firstNonEmpty(user.ClanNick, user.DisplayName, user.Username)
-				senderAvatar = firstNonEmpty(user.ClanAvatar, user.Avatar)
+		if m.Channel != nil && m.Channel.Clan != nil {
+			if client := m.Channel.Clan.client; client != nil {
+				if user, err := client.Users.Fetch(m.SenderID); err == nil && user != nil {
+					senderUsername = firstNonEmpty(user.ClanNick, user.DisplayName, user.Username)
+					senderAvatar = firstNonEmpty(user.ClanAvatar, user.Avatar)
+				}
 			}
 		}
 		refs := []MessageRef{{
@@ -91,7 +106,7 @@ func (m *Message) Reply(content Content, opts *SendOptions) (*Message, error) {
 			topic = m.TopicID
 		}
 		data := ReplyMessageData{
-			ClanID:           m.Channel.Clan.ID,
+			ClanID:           m.clanID(),
 			ChannelID:        m.Channel.ID,
 			ChannelType:      m.Channel.ChannelType,
 			Mode:             m.mode(),
@@ -134,7 +149,7 @@ func (m *Message) Update(content Content, mentions []Mention, attachments []Atta
 			topic = "0"
 		}
 		data := UpdateMessageData{
-			ClanID:            m.Channel.Clan.ID,
+			ClanID:            m.clanID(),
 			ChannelID:         m.Channel.ID,
 			ChannelType:       m.Channel.ChannelType,
 			Mode:              m.mode(),
@@ -186,7 +201,7 @@ func (m *Message) React(p ReactPayload) (*api.MessageReaction, error) {
 		}
 		data := ReactMessageData{
 			ID:              reactID,
-			ClanID:          m.Channel.Clan.ID,
+			ClanID:          m.clanID(),
 			ChannelID:       m.Channel.ID,
 			ChannelType:     m.Channel.ChannelType,
 			Mode:            m.mode(),
@@ -210,7 +225,7 @@ func (m *Message) Delete() (*rtapi.ChannelMessageAck, error) {
 			topic = "0"
 		}
 		data := RemoveMessageData{
-			ClanID:      m.Channel.Clan.ID,
+			ClanID:      m.clanID(),
 			ChannelID:   m.Channel.ID,
 			ChannelType: m.Channel.ChannelType,
 			Mode:        m.mode(),

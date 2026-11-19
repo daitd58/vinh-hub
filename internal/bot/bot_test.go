@@ -351,3 +351,35 @@ func TestHandleRegisterQRCommand_Permissions(t *testing.T) {
 		t.Errorf("admin should be able to update payment QR, got %s", sportMgr.GetPaymentQR())
 	}
 }
+
+func TestHandleCountdownCommands(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Ho_Chi_Minh")
+	b := &Bot{
+		cfg: Config{
+			Timezone: loc,
+		},
+	}
+
+	commands := []struct {
+		cmd  string
+		kind string
+	}{
+		{"*demngaynhanluong", "nhanluong"},
+		{"*demngaytetam", "tetam"},
+		{"*demngaytetduong", "tetduong"},
+		{"*demngaygiangsinh", "giangsinh"},
+		{"*demngaytrungthu", "trungthu"},
+		{"*demngayyep", "yep"},
+		{"*demngayep", "yep"},
+	}
+
+	for _, tc := range commands {
+		msg := &mezon.ChannelMessage{
+			ChannelID: "chan1",
+			SenderID:  "user1",
+			Content:   []byte(`{"t":"` + tc.cmd + `"}`),
+		}
+		// handleMessage should recognize and invoke handleCountdownCommand without panic
+		b.handleMessage(msg)
+	}
+}
